@@ -16,7 +16,7 @@ public static class CSweetMemoryCapabilities
 
 public sealed record CSweetMemoryCommand(string Operation, JsonElement Payload);
 
-public sealed class CSweetBrokerMemoryStore : IMemoryStore
+public sealed class CSweetBrokerMemoryStore : IMemoryStore, IKnowledgeTransferStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly IAgentBrokerClient _broker;
@@ -31,6 +31,7 @@ public sealed class CSweetBrokerMemoryStore : IMemoryStore
     public Task InitializeAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     public Task<MemoryWriteResult> AppendEpisodeAsync(MemoryEpisode episode, CancellationToken cancellationToken = default) => WriteAsync<MemoryWriteResult>("append-episode", episode, cancellationToken);
     public Task<MemoryWriteResult> UpsertEntityAsync(MemoryEntity entity, CancellationToken cancellationToken = default) => WriteAsync<MemoryWriteResult>("upsert-entity", entity, cancellationToken);
+    public Task<MemoryEntity?> FindEntityByApplicationKeyAsync(MemoryPartition partition, string applicationKey, CancellationToken cancellationToken = default) => QueryAsync<MemoryEntity?>("find-entity-by-application-key", new { partition, applicationKey }, cancellationToken);
     public Task<MemoryEntity?> FindEntityAsync(MemoryPartition partition, string canonicalName, CancellationToken cancellationToken = default) => QueryAsync<MemoryEntity?>("find-entity", new { partition, canonicalName }, cancellationToken);
     public Task<MemoryWriteResult> WriteClaimAsync(MemoryClaim claim, CancellationToken cancellationToken = default) => WriteAsync<MemoryWriteResult>("write-claim", claim, cancellationToken);
     public Task<MemoryWriteResult> WriteEdgeAsync(MemoryEdge edge, CancellationToken cancellationToken = default) => WriteAsync<MemoryWriteResult>("write-edge", edge, cancellationToken);
@@ -43,6 +44,8 @@ public sealed class CSweetBrokerMemoryStore : IMemoryStore
     public Task<MemoryClaim?> GetClaimAsync(Guid claimId, CancellationToken cancellationToken = default) => QueryAsync<MemoryClaim?>("get-claim", new { claimId }, cancellationToken);
     public async Task SetClaimConfirmationAsync(Guid claimId, MemoryConfirmationState confirmation, CancellationToken cancellationToken = default) => await ManageAsync<MemoryWriteResult>("set-confirmation", new { claimId, confirmation }, cancellationToken);
     public Task<IReadOnlyList<MemoryClaim>> ListClaimsAsync(MemoryPartition partition, CancellationToken cancellationToken = default) => QueryAsync<IReadOnlyList<MemoryClaim>>("list-claims", partition, cancellationToken);
+    public async Task WriteKnowledgeTransferAsync(KnowledgeTransferPackage package, CancellationToken cancellationToken = default) => await ManageAsync<MemoryWriteResult>("write-knowledge-transfer", package, cancellationToken);
+    public Task<KnowledgeTransferPackage?> GetKnowledgeTransferAsync(Guid packageId, CancellationToken cancellationToken = default) => QueryAsync<KnowledgeTransferPackage?>("get-knowledge-transfer", new { packageId }, cancellationToken);
     public Task<MemoryExport> ExportAsync(MemoryPartition partition, CancellationToken cancellationToken = default) => InvokeAsync<MemoryExport>(CSweetMemoryCapabilities.Export, "export", partition, cancellationToken);
     public async Task DeleteScopeAsync(MemoryPartition partition, CancellationToken cancellationToken = default) => await ManageAsync<MemoryWriteResult>("delete-scope", partition, cancellationToken);
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

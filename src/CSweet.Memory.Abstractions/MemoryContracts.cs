@@ -36,7 +36,10 @@ public sealed record MemoryIngestRequest(
     DateTimeOffset? OccurredAt = null,
     DateTimeOffset? ExpiresAt = null,
     bool LegalHold = false,
-    IReadOnlyDictionary<string, string>? Metadata = null);
+    IReadOnlyDictionary<string, string>? Metadata = null,
+    MemoryAccessContext? Access = null,
+    MemorySensitivity Sensitivity = MemorySensitivity.Internal,
+    IReadOnlyList<MemoryOperationalReference>? OperationalReferences = null);
 
 public sealed record MemoryRecallRequest(
     MemoryPartition Partition,
@@ -45,7 +48,38 @@ public sealed record MemoryRecallRequest(
     string? InvocationId = null,
     int? TokenBudget = null,
     DateTimeOffset? AsOf = null,
-    IReadOnlySet<MemoryLayer>? Layers = null);
+    IReadOnlySet<MemoryLayer>? Layers = null,
+    MemoryAccessContext? Access = null);
+
+public sealed record PrepareKnowledgeTransferRequest(
+    string SourceEmployeeId,
+    string TargetEmployeeId,
+    IReadOnlyList<MemoryNamespace> SourceNamespaces,
+    MemoryNamespace TargetNamespace,
+    MemoryAccessContext Access,
+    string Debrief,
+    MemorySensitivity DebriefSensitivity = MemorySensitivity.Internal,
+    MemorySensitivity MaximumSensitivity = MemorySensitivity.Confidential,
+    IReadOnlySet<MemoryLayer>? Layers = null,
+    IReadOnlySet<Guid>? SelectedMemoryIds = null,
+    int TokenBudget = 8_000);
+
+public sealed record ApproveKnowledgeTransferRequest(
+    Guid PackageId,
+    MemoryAccessContext Access,
+    bool Approved,
+    string? Notes = null);
+
+public sealed record ApplyKnowledgeTransferRequest(Guid PackageId, MemoryAccessContext Access);
+
+public sealed record MemoryFeedbackRequest(
+    MemoryPartition Partition,
+    MemoryScope Scope,
+    string InvocationId,
+    Guid MemoryId,
+    MemoryLayer Layer,
+    MemoryUseOutcome Outcome,
+    MemoryAccessContext Access);
 
 public sealed record MemoryExport(
     string SchemaVersion,
@@ -63,6 +97,7 @@ public interface IMemoryStore : IAsyncDisposable
     Task InitializeAsync(CancellationToken cancellationToken = default);
     Task<MemoryWriteResult> AppendEpisodeAsync(MemoryEpisode episode, CancellationToken cancellationToken = default);
     Task<MemoryWriteResult> UpsertEntityAsync(MemoryEntity entity, CancellationToken cancellationToken = default);
+    Task<MemoryEntity?> FindEntityByApplicationKeyAsync(MemoryPartition partition, string applicationKey, CancellationToken cancellationToken = default);
     Task<MemoryEntity?> FindEntityAsync(MemoryPartition partition, string canonicalName, CancellationToken cancellationToken = default);
     Task<MemoryWriteResult> WriteClaimAsync(MemoryClaim claim, CancellationToken cancellationToken = default);
     Task<MemoryWriteResult> WriteEdgeAsync(MemoryEdge edge, CancellationToken cancellationToken = default);
@@ -83,10 +118,20 @@ public interface IMemoryEngine
 {
     Task<MemoryEpisode> IngestAsync(MemoryIngestRequest request, CancellationToken cancellationToken = default);
     Task<MemoryContextPacket> RecallAsync(MemoryRecallRequest request, CancellationToken cancellationToken = default);
-    Task<MemoryClaim> CorrectClaimAsync(Guid claimId, string replacementValue, MemorySource source, CancellationToken cancellationToken = default);
-    Task ConfirmClaimAsync(Guid claimId, bool confirmed, CancellationToken cancellationToken = default);
-    Task<MemoryExport> ExportAsync(MemoryPartition partition, CancellationToken cancellationToken = default);
-    Task DeleteAsync(MemoryPartition partition, CancellationToken cancellationToken = default);
+    Task<MemoryClaim> CorrectClaimAsync(Guid claimId, string replacementValue, MemorySource source, MemoryAccessContext? access = null, CancellationToken cancellationToken = default);
+    Task ConfirmClaimAsync(Guid claimId, bool confirmed, MemoryAccessContext? access = null, CancellationToken cancellationToken = default);
+    Task<MemoryExport> ExportAsync(MemoryPartition partition, MemoryAccessContext? access = null, CancellationToken cancellationToken = default);
+    Task DeleteAsync(MemoryPartition partition, MemoryAccessContext? access = null, CancellationToken cancellationToken = default);
+    Task<KnowledgeTransferPackage> PrepareKnowledgeTransferAsync(PrepareKnowledgeTransferRequest request, CancellationToken cancellationToken = default);
+    Task<KnowledgeTransferPackage> ApproveKnowledgeTransferAsync(ApproveKnowledgeTransferRequest request, CancellationToken cancellationToken = default);
+    Task<KnowledgeTransferPackage> ApplyKnowledgeTransferAsync(ApplyKnowledgeTransferRequest request, CancellationToken cancellationToken = default);
+    Task RecordFeedbackAsync(MemoryFeedbackRequest request, CancellationToken cancellationToken = default);
+}
+
+public interface IKnowledgeTransferStore
+{
+    Task WriteKnowledgeTransferAsync(KnowledgeTransferPackage package, CancellationToken cancellationToken = default);
+    Task<KnowledgeTransferPackage?> GetKnowledgeTransferAsync(Guid packageId, CancellationToken cancellationToken = default);
 }
 
 public interface IMemoryEnricher
@@ -107,7 +152,7 @@ public interface IMemoryQueryEmbedder
 }
 
 public sealed record ExtractedEntity(string Type, string Name, IReadOnlyList<string>? Aliases = null, string? ApplicationKey = null);
-public sealed record ExtractedClaim(string SubjectName, string Predicate, string? ObjectName, string? Value, double Confidence, double Importance, MemorySensitivity Sensitivity);
+public sealed record ExtractedClaim(string SubjectName, string Predicate, string? ObjectName, string? Value, double Confidence, double Importance, MemorySensitivity Sensitivity, MemoryClaimKind Kind = MemoryClaimKind.Fact);
 public sealed record ExtractedEdge(string FromName, string Relationship, string ToName, double Confidence);
 public sealed record ExtractedProcedure(string Name, string Procedure, string? Applicability = null);
 public sealed record MemoryEnrichment(
@@ -119,13 +164,22 @@ public sealed record MemoryEnrichment(
 
 public interface IMemoryScopeAuthorizer
 {
-    ValueTask<bool> CanReadAsync(MemoryPartition partition, MemoryScope scope, CancellationToken cancellationToken = default);
-    ValueTask<bool> CanWriteAsync(MemoryPartition partition, MemoryScope scope, CancellationToken cancellationToken = default);
+    ValueTask<bool> CanReadAsync(MemoryPartition partition, MemoryScope scope, MemoryAccessContext? access, CancellationToken cancellationToken = default);
+    ValueTask<bool> CanWriteAsync(MemoryPartition partition, MemoryScope scope, MemoryAccessContext? access, CancellationToken cancellationToken = default);
+}
+
+public interface IMemoryNamespaceResolver
+{
+    ValueTask<IReadOnlyList<MemoryNamespace>> ResolveReadableNamespacesAsync(
+        MemoryPartition primaryPartition,
+        MemoryScope primaryScope,
+        MemoryAccessContext? access,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IMemoryRedactor
 {
-    ValueTask<string> RedactAsync(string content, MemorySensitivity sensitivity, CancellationToken cancellationToken = default);
+    ValueTask<string> RedactAsync(string content, MemorySensitivity sensitivity, MemoryAccessContext? access, CancellationToken cancellationToken = default);
 }
 
 public interface IMemoryEncryptionProvider

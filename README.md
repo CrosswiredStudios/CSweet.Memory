@@ -1,8 +1,16 @@
 # CSweet.Memory
 
-`CSweet.Memory` is a vendor-neutral temporal memory framework for .NET agents. It stores immutable source episodes, derives provenance-bearing claims and relationships, retrieves context with hybrid rank fusion, and integrates with Microsoft Agent Framework through `AIContextProvider`.
+`CSweet.Memory` is a first-party temporal memory framework for .NET agents. It stores immutable source episodes, derives provenance-bearing claims and relationships, retrieves context with hybrid rank fusion, and integrates with Microsoft Agent Framework through `AIContextProvider`.
 
-The first-party Integrated stores use SQLite for local development and PostgreSQL for production. Mem0 and Neo4j are optional connectors; neither is required.
+The framework owns its complete memory pipeline and does not wrap or depend on another agent-memory product. SQLite provides embedded local storage and PostgreSQL provides production storage. Both implement the same temporal property-graph model without requiring a graph database.
+
+## Employee memory model
+
+C-Sweet operational records remain authoritative for employees, roles, teams, assignments, objectives, tasks, cases, and approvals. Memory stores evidence-backed observations and experience about those records through stable `MemoryOperationalReference` and entity application keys; it is not a competing HR or workflow database.
+
+Employee memory distinguishes facts, observations, decisions, commitments, outcomes, handoffs, feedback, failures, demonstrated skills, and open questions. Retrieval can combine authorized organization, team, role, employee, user-relationship, case, and conversation namespaces. Authorization is evaluated before each namespace is searched.
+
+The engine denies reads and writes by default and redacts content above the caller's explicit `memory.maxSensitivity` attribute. Applications must register an `IMemoryScopeAuthorizer`. `DelegatedMemoryScopeAuthorizer` is intended only when a trusted downstream broker performs the definitive policy check; `AllowAllMemoryScopeAuthorizer` is for isolated tests and local development.
 
 ```csharp
 services.AddAgentMemory(options =>
@@ -16,4 +24,30 @@ services.AddAgentMemory(options =>
 services.AddAgentMemoryContextProvider();
 ```
 
-The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.CSweet` currently targets .NET 10 because the C-Sweet Agent SDK targets .NET 10. All packages are licensed under Apache-2.0.
+## Knowledge transfer
+
+Replacing an employee is an approval-gated workflow rather than a bulk copy of private history:
+
+1. `PrepareKnowledgeTransferAsync` builds an inspectable debrief package from authorized source namespaces.
+2. Sensitivity, layer, selected-memory, and token-budget filters are applied before the package is persisted.
+3. `ApproveKnowledgeTransferAsync` records an approval or rejection and its reviewer.
+4. `ApplyKnowledgeTransferAsync` creates one provenance-bearing episode in the replacement employee's namespace and queues normal enrichment.
+
+Raw episodic history is excluded by default. A transfer normally contains active semantic knowledge, curated core memory, and confirmed procedures. Episodic history must be selected explicitly. Restricted content cannot be included when the transfer's maximum sensitivity is lower, and the target must be an employee namespace matching the replacement employee.
+
+```csharp
+var package = await memory.PrepareKnowledgeTransferAsync(new(
+    SourceEmployeeId: "employee-old",
+    TargetEmployeeId: "employee-new",
+    SourceNamespaces: [EmployeeMemoryNamespaces.Employee(tenantId, "employee-old")],
+    TargetNamespace: EmployeeMemoryNamespaces.Employee(tenantId, "employee-new"),
+    Access: managerAccess,
+    Debrief: "Open work, key decisions, recurring risks, and important relationships."));
+
+package = await memory.ApproveKnowledgeTransferAsync(
+    new(package.Id, managerAccess, Approved: true));
+package = await memory.ApplyKnowledgeTransferAsync(
+    new(package.Id, managerAccess));
+```
+
+The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` currently targets .NET 10 because the C-Sweet Agent SDK targets .NET 10. All packages are licensed under Apache-2.0.

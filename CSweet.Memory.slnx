@@ -4,8 +4,6 @@
   <Project Path="src/CSweet.Memory.MicrosoftAgentFramework/CSweet.Memory.MicrosoftAgentFramework.csproj" />
   <Project Path="src/CSweet.Memory.Sqlite/CSweet.Memory.Sqlite.csproj" />
   <Project Path="src/CSweet.Memory.PostgreSql/CSweet.Memory.PostgreSql.csproj" />
-  <Project Path="src/CSweet.Memory.Connectors.Mem0/CSweet.Memory.Connectors.Mem0.csproj" />
-  <Project Path="src/CSweet.Memory.Connectors.Neo4j/CSweet.Memory.Connectors.Neo4j.csproj" />
-  <Project Path="src/CSweet.Memory.CSweet/CSweet.Memory.CSweet.csproj" />
+  <Project Path="src/CSweet.Memory.Broker/CSweet.Memory.Broker.csproj" />
   <Project Path="tests/CSweet.Memory.Tests/CSweet.Memory.Tests.csproj" />
 </Solution>

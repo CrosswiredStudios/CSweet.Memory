@@ -57,7 +57,10 @@ public sealed class MemoryEnrichmentWorker : BackgroundService, IMemoryEnrichmen
         var entities = new Dictionary<string, MemoryEntity>(StringComparer.OrdinalIgnoreCase);
         foreach (var extracted in enrichment.Entities)
         {
-            var existing = await _store.FindEntityAsync(episode.Partition, extracted.Name, cancellationToken);
+            var existing = !string.IsNullOrWhiteSpace(extracted.ApplicationKey)
+                ? await _store.FindEntityByApplicationKeyAsync(episode.Partition, extracted.ApplicationKey, cancellationToken)
+                : null;
+            existing ??= await _store.FindEntityAsync(episode.Partition, extracted.Name, cancellationToken);
             var isProtected = _options.ProtectedEntityTypes.Contains(extracted.Type);
             var type = isProtected || extracted.Type.StartsWith("learned:", StringComparison.OrdinalIgnoreCase)
                 ? extracted.Type
@@ -81,7 +84,7 @@ public sealed class MemoryEnrichmentWorker : BackgroundService, IMemoryEnrichmen
                 Guid.NewGuid(), episode.Partition, episode.Id, subject.Id, extracted.Predicate,
                 objectEntity?.Id, extracted.Value, MemoryTrustTier.AgentInference, confirmation,
                 extracted.Sensitivity, Math.Clamp(extracted.Confidence, 0, 1), Math.Clamp(extracted.Importance, 0, 1),
-                episode.OccurredAt, null, DateTimeOffset.UtcNow, ExtractorVersion: _enricher!.Version);
+                episode.OccurredAt, null, DateTimeOffset.UtcNow, ExtractorVersion: _enricher!.Version, Kind: extracted.Kind);
             var conflicting = (await _store.ListClaimsAsync(episode.Partition, cancellationToken))
                 .FirstOrDefault(existing => existing.SubjectEntityId == subject.Id &&
                     string.Equals(existing.Predicate, extracted.Predicate, StringComparison.OrdinalIgnoreCase) &&

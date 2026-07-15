@@ -14,8 +14,9 @@ public static class AgentMemoryServiceCollectionExtensions
     {
         if (configure is null) services.AddOptions<AgentMemoryOptions>();
         else services.Configure(configure);
-        services.AddSingleton<IMemoryScopeAuthorizer, AllowAllMemoryScopeAuthorizer>();
-        services.AddSingleton<IMemoryRedactor, PassthroughMemoryRedactor>();
+        services.AddSingleton<IMemoryScopeAuthorizer, DenyAllMemoryScopeAuthorizer>();
+        services.AddSingleton<IMemoryRedactor, SafeMemoryRedactor>();
+        services.AddSingleton<IMemoryNamespaceResolver, WorkContextMemoryNamespaceResolver>();
         services.AddSingleton<MemoryEnrichmentWorker>();
         services.AddSingleton<IMemoryEnrichmentQueue>(provider => provider.GetRequiredService<MemoryEnrichmentWorker>());
         services.AddHostedService(provider => provider.GetRequiredService<MemoryEnrichmentWorker>());

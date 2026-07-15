@@ -4,7 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CSweet.Memory;
 
-public sealed class SqliteMemoryStore : IMemoryStore
+public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeTransferStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string _connectionString;
@@ -87,6 +87,22 @@ public sealed class SqliteMemoryStore : IMemoryStore
 
     public async Task<MemoryWriteResult> UpsertEntityAsync(MemoryEntity entity, CancellationToken cancellationToken = default)
     {
+        if (!string.IsNullOrWhiteSpace(entity.ApplicationKey))
+        {
+            var identified = await FindEntityByApplicationKeyAsync(entity.Partition, entity.ApplicationKey, cancellationToken);
+            if (identified is not null)
+            {
+                entity = entity with { Id = identified.Id, CreatedAt = identified.CreatedAt };
+                await using var updateConnection = await OpenAsync(cancellationToken);
+                await using var update = updateConnection.CreateCommand();
+                update.CommandText = "UPDATE memory_entities SET canonical_name=$name,payload=$payload WHERE id=$id";
+                update.Parameters.AddWithValue("$name", entity.CanonicalName);
+                update.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(entity, JsonOptions));
+                update.Parameters.AddWithValue("$id", entity.Id.ToString("D"));
+                await update.ExecuteNonQueryAsync(cancellationToken);
+                return new MemoryWriteResult(entity.Id, false, "Updated by authoritative application key.");
+            }
+        }
         await using var connection = await OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -111,6 +127,27 @@ public sealed class SqliteMemoryStore : IMemoryStore
         command.CommandText = "SELECT payload FROM memory_entities WHERE partition_key=$partition AND canonical_name=$name COLLATE NOCASE LIMIT 1";
         command.Parameters.AddWithValue("$partition", partition.Key);
         command.Parameters.AddWithValue("$name", canonicalName);
+        var exact = Deserialize<MemoryEntity>(await command.ExecuteScalarAsync(cancellationToken));
+        if (exact is not null) return exact;
+        await using var aliases = connection.CreateCommand();
+        aliases.CommandText = "SELECT payload FROM memory_entities WHERE partition_key=$partition";
+        aliases.Parameters.AddWithValue("$partition", partition.Key);
+        await using var reader = await aliases.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var entity = JsonSerializer.Deserialize<MemoryEntity>(reader.GetString(0), JsonOptions)!;
+            if (entity.Aliases.Contains(canonicalName, StringComparer.OrdinalIgnoreCase)) return entity;
+        }
+        return null;
+    }
+
+    public async Task<MemoryEntity?> FindEntityByApplicationKeyAsync(MemoryPartition partition, string applicationKey, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT payload FROM memory_entities WHERE partition_key=$partition AND application_key=$key LIMIT 1";
+        command.Parameters.AddWithValue("$partition", partition.Key);
+        command.Parameters.AddWithValue("$key", applicationKey);
         return Deserialize<MemoryEntity>(await command.ExecuteScalarAsync(cancellationToken));
     }
 
@@ -202,7 +239,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
             {
                 var episode = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(0), JsonOptions)!;
                 results.Add(new MemoryCandidate(episode.Id, MemoryLayer.Episodic, episode.Content, score,
-                    SourceTrust(episode.Source.Type), MemoryConfirmationState.NotRequired, MemorySensitivity.Internal,
+                    SourceTrust(episode.Source.Type), MemoryConfirmationState.NotRequired, episode.Sensitivity,
                     episode.OccurredAt, episode.ExpiresAt, [episode.Id], "fulltext"));
                 score = Math.Max(0.1, score - 0.02);
             }
@@ -277,7 +314,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
                 var episode = JsonSerializer.Deserialize<MemoryEpisode>(vectorReader.GetString(1), JsonOptions)!;
                 vectorCandidates.Add(new MemoryCandidate(episode.Id, MemoryLayer.Episodic, episode.Content,
                     CosineSimilarity(request.Embedding, embedding.Vector), SourceTrust(episode.Source.Type),
-                    MemoryConfirmationState.NotRequired, MemorySensitivity.Internal,
+                    MemoryConfirmationState.NotRequired, episode.Sensitivity,
                     episode.OccurredAt, episode.ExpiresAt, [episode.Id], "vector"));
             }
             results.AddRange(vectorCandidates.OrderByDescending(candidate => candidate.Score).Take(request.Limit));
@@ -335,6 +372,34 @@ public sealed class SqliteMemoryStore : IMemoryStore
         await ListPayloadsAsync<MemoryBlock>("memory_blocks", partition, cancellationToken),
         await ListPayloadsAsync<ProceduralMemory>("memory_procedures", partition, cancellationToken),
         await ListPayloadsAsync<MemoryEmbedding>("memory_embeddings", partition, cancellationToken));
+
+    public async Task WriteKnowledgeTransferAsync(KnowledgeTransferPackage package, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO memory_transfers(id,tenant_id,source_employee_id,target_employee_id,status,created_at,payload)
+            VALUES($id,$tenant,$source,$target,$status,$created,$payload)
+            ON CONFLICT(id) DO UPDATE SET status=excluded.status,payload=excluded.payload
+            """;
+        command.Parameters.AddWithValue("$id", package.Id.ToString("D"));
+        command.Parameters.AddWithValue("$tenant", package.TenantId);
+        command.Parameters.AddWithValue("$source", package.SourceEmployeeId);
+        command.Parameters.AddWithValue("$target", package.TargetEmployeeId);
+        command.Parameters.AddWithValue("$status", (int)package.Status);
+        command.Parameters.AddWithValue("$created", package.CreatedAt.ToString("O"));
+        command.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(package, JsonOptions));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<KnowledgeTransferPackage?> GetKnowledgeTransferAsync(Guid packageId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT payload FROM memory_transfers WHERE id=$id";
+        command.Parameters.AddWithValue("$id", packageId.ToString("D"));
+        return Deserialize<KnowledgeTransferPackage>(await command.ExecuteScalarAsync(cancellationToken));
+    }
 
     public async Task DeleteScopeAsync(MemoryPartition partition, CancellationToken cancellationToken = default)
     {
@@ -448,6 +513,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
         CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_episode_idempotency ON memory_episodes(partition_key,idempotency_key) WHERE idempotency_key IS NOT NULL;
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_episodes_fts USING fts5(id UNINDEXED,content);
         CREATE TABLE IF NOT EXISTS memory_entities(id TEXT PRIMARY KEY,partition_key TEXT NOT NULL,canonical_name TEXT NOT NULL COLLATE NOCASE,application_key TEXT,payload TEXT NOT NULL,UNIQUE(partition_key,canonical_name));
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_entity_application_key ON memory_entities(partition_key,application_key) WHERE application_key IS NOT NULL;
         CREATE TABLE IF NOT EXISTS memory_claims(id TEXT PRIMARY KEY,partition_key TEXT NOT NULL,episode_id TEXT NOT NULL,subject_id TEXT NOT NULL,predicate TEXT NOT NULL,value TEXT,confirmation INTEGER NOT NULL,valid_from TEXT NOT NULL,valid_to TEXT,payload TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS ix_memory_claim_lookup ON memory_claims(partition_key,subject_id,predicate,valid_to);
         CREATE TABLE IF NOT EXISTS memory_edges(id TEXT PRIMARY KEY,partition_key TEXT NOT NULL,episode_id TEXT NOT NULL,from_id TEXT NOT NULL,relationship TEXT NOT NULL,to_id TEXT NOT NULL,valid_from TEXT NOT NULL,valid_to TEXT,payload TEXT NOT NULL);
@@ -456,5 +522,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
         CREATE TABLE IF NOT EXISTS memory_procedures(id TEXT PRIMARY KEY,partition_key TEXT NOT NULL,episode_id TEXT NOT NULL,name TEXT NOT NULL,confirmation INTEGER NOT NULL,valid_from TEXT NOT NULL,valid_to TEXT,payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS memory_embeddings(id TEXT PRIMARY KEY,partition_key TEXT NOT NULL,memory_id TEXT NOT NULL,layer INTEGER NOT NULL,payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS memory_uses(id TEXT PRIMARY KEY,partition_key TEXT NOT NULL,memory_id TEXT NOT NULL,outcome INTEGER NOT NULL,payload TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS memory_transfers(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,source_employee_id TEXT NOT NULL,target_employee_id TEXT NOT NULL,status INTEGER NOT NULL,created_at TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS ix_memory_transfer_employees ON memory_transfers(tenant_id,source_employee_id,target_employee_id,status);
         """;
 }

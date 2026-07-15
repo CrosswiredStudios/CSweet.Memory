@@ -4,7 +4,7 @@ using NpgsqlTypes;
 
 namespace CSweet.Memory;
 
-public sealed class PostgreSqlMemoryStore : IMemoryStore
+public sealed class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTransferStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly NpgsqlDataSource _dataSource;
@@ -60,6 +60,20 @@ public sealed class PostgreSqlMemoryStore : IMemoryStore
     public async Task<MemoryWriteResult> UpsertEntityAsync(MemoryEntity entity, CancellationToken cancellationToken = default)
     {
         await InitializeAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(entity.ApplicationKey))
+        {
+            var identified = await FindEntityByApplicationKeyAsync(entity.Partition, entity.ApplicationKey, cancellationToken);
+            if (identified is not null)
+            {
+                entity = entity with { Id = identified.Id, CreatedAt = identified.CreatedAt };
+                await using var update = _dataSource.CreateCommand("UPDATE csweet_memory_entities SET canonical_name=@name,payload=@payload::jsonb WHERE id=@id");
+                update.Parameters.AddWithValue("name", entity.CanonicalName);
+                update.Parameters.AddWithValue("payload", JsonSerializer.Serialize(entity, JsonOptions));
+                update.Parameters.AddWithValue("id", entity.Id);
+                await update.ExecuteNonQueryAsync(cancellationToken);
+                return new MemoryWriteResult(entity.Id, false, "Updated by authoritative application key.");
+            }
+        }
         const string sql = """
             INSERT INTO csweet_memory_entities(id,partition_key,canonical_name,application_key,payload)
             VALUES(@id,@partition,@name,@applicationKey,@payload::jsonb)
@@ -82,6 +96,22 @@ public sealed class PostgreSqlMemoryStore : IMemoryStore
         await using var command = _dataSource.CreateCommand("SELECT payload::text FROM csweet_memory_entities WHERE partition_key=@partition AND lower(canonical_name)=lower(@name) LIMIT 1");
         command.Parameters.AddWithValue("partition", partition.Key);
         command.Parameters.AddWithValue("name", canonicalName);
+        var exact = Deserialize<MemoryEntity>(await command.ExecuteScalarAsync(cancellationToken));
+        if (exact is not null) return exact;
+        await foreach (var json in QueryPayloadsAsync("SELECT payload::text FROM csweet_memory_entities WHERE partition_key=@partition", partition.Key, cancellationToken))
+        {
+            var entity = JsonSerializer.Deserialize<MemoryEntity>(json, JsonOptions)!;
+            if (entity.Aliases.Contains(canonicalName, StringComparer.OrdinalIgnoreCase)) return entity;
+        }
+        return null;
+    }
+
+    public async Task<MemoryEntity?> FindEntityByApplicationKeyAsync(MemoryPartition partition, string applicationKey, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+        await using var command = _dataSource.CreateCommand("SELECT payload::text FROM csweet_memory_entities WHERE partition_key=@partition AND application_key=@key LIMIT 1");
+        command.Parameters.AddWithValue("partition", partition.Key);
+        command.Parameters.AddWithValue("key", applicationKey);
         return Deserialize<MemoryEntity>(await command.ExecuteScalarAsync(cancellationToken));
     }
 
@@ -164,7 +194,7 @@ public sealed class PostgreSqlMemoryStore : IMemoryStore
             {
                 var episode = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(0), JsonOptions)!;
                 results.Add(new(episode.Id, MemoryLayer.Episodic, episode.Content, reader.GetDouble(1), SourceTrust(episode.Source.Type),
-                    MemoryConfirmationState.NotRequired, MemorySensitivity.Internal, episode.OccurredAt, episode.ExpiresAt, [episode.Id], "fulltext"));
+                    MemoryConfirmationState.NotRequired, episode.Sensitivity, episode.OccurredAt, episode.ExpiresAt, [episode.Id], "fulltext"));
             }
         }
         if (Included(request, MemoryLayer.Semantic))
@@ -232,7 +262,7 @@ public sealed class PostgreSqlMemoryStore : IMemoryStore
                 if (embedding.Vector.Count != request.Embedding.Count) continue;
                 var episode = JsonSerializer.Deserialize<MemoryEpisode>(vectorReader.GetString(1), JsonOptions)!;
                 vectorCandidates.Add(new(episode.Id, MemoryLayer.Episodic, episode.Content, CosineSimilarity(request.Embedding, embedding.Vector),
-                    SourceTrust(episode.Source.Type), MemoryConfirmationState.NotRequired, MemorySensitivity.Internal,
+                    SourceTrust(episode.Source.Type), MemoryConfirmationState.NotRequired, episode.Sensitivity,
                     episode.OccurredAt, episode.ExpiresAt, [episode.Id], "vector"));
             }
             results.AddRange(vectorCandidates.OrderByDescending(candidate => candidate.Score).Take(request.Limit));
@@ -286,6 +316,33 @@ public sealed class PostgreSqlMemoryStore : IMemoryStore
         await ListAsync<MemoryBlock>("csweet_memory_blocks", partition, cancellationToken),
         await ListAsync<ProceduralMemory>("csweet_memory_procedures", partition, cancellationToken),
         await ListAsync<MemoryEmbedding>("csweet_memory_embeddings", partition, cancellationToken));
+
+    public async Task WriteKnowledgeTransferAsync(KnowledgeTransferPackage package, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+        const string sql = """
+            INSERT INTO csweet_memory_transfers(id,tenant_id,source_employee_id,target_employee_id,status,created_at,payload)
+            VALUES(@id,@tenant,@source,@target,@status,@created,@payload::jsonb)
+            ON CONFLICT(id) DO UPDATE SET status=excluded.status,payload=excluded.payload
+            """;
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", package.Id);
+        command.Parameters.AddWithValue("tenant", package.TenantId);
+        command.Parameters.AddWithValue("source", package.SourceEmployeeId);
+        command.Parameters.AddWithValue("target", package.TargetEmployeeId);
+        command.Parameters.AddWithValue("status", (int)package.Status);
+        command.Parameters.AddWithValue("created", package.CreatedAt);
+        command.Parameters.AddWithValue("payload", JsonSerializer.Serialize(package, JsonOptions));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<KnowledgeTransferPackage?> GetKnowledgeTransferAsync(Guid packageId, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+        await using var command = _dataSource.CreateCommand("SELECT payload::text FROM csweet_memory_transfers WHERE id=@id");
+        command.Parameters.AddWithValue("id", packageId);
+        return Deserialize<KnowledgeTransferPackage>(await command.ExecuteScalarAsync(cancellationToken));
+    }
 
     public async Task DeleteScopeAsync(MemoryPartition partition, CancellationToken cancellationToken = default)
     {
@@ -371,6 +428,7 @@ public sealed class PostgreSqlMemoryStore : IMemoryStore
         CREATE INDEX IF NOT EXISTS ix_csweet_memory_episode_search ON csweet_memory_episodes USING GIN(search_vector);
         CREATE TABLE IF NOT EXISTS csweet_memory_entities(id uuid PRIMARY KEY,partition_key text NOT NULL,canonical_name text NOT NULL,application_key text,payload jsonb NOT NULL);
         CREATE UNIQUE INDEX IF NOT EXISTS ux_csweet_memory_entity_name ON csweet_memory_entities(partition_key,lower(canonical_name));
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_csweet_memory_entity_application_key ON csweet_memory_entities(partition_key,application_key) WHERE application_key IS NOT NULL;
         CREATE TABLE IF NOT EXISTS csweet_memory_claims(id uuid PRIMARY KEY,partition_key text NOT NULL,episode_id uuid NOT NULL,subject_id uuid NOT NULL,predicate text NOT NULL,value text,confirmation integer NOT NULL,valid_from timestamptz NOT NULL,valid_to timestamptz,payload jsonb NOT NULL);
         CREATE INDEX IF NOT EXISTS ix_csweet_memory_claim_lookup ON csweet_memory_claims(partition_key,subject_id,predicate,valid_to);
         CREATE TABLE IF NOT EXISTS csweet_memory_edges(id uuid PRIMARY KEY,partition_key text NOT NULL,episode_id uuid NOT NULL,from_id uuid NOT NULL,relationship text NOT NULL,to_id uuid NOT NULL,valid_from timestamptz NOT NULL,valid_to timestamptz,payload jsonb NOT NULL);
@@ -379,5 +437,7 @@ public sealed class PostgreSqlMemoryStore : IMemoryStore
         CREATE TABLE IF NOT EXISTS csweet_memory_procedures(id uuid PRIMARY KEY,partition_key text NOT NULL,episode_id uuid NOT NULL,name text NOT NULL,confirmation integer NOT NULL,valid_from timestamptz NOT NULL,valid_to timestamptz,payload jsonb NOT NULL);
         CREATE TABLE IF NOT EXISTS csweet_memory_embeddings(id uuid PRIMARY KEY,partition_key text NOT NULL,memory_id uuid NOT NULL,layer integer NOT NULL,payload jsonb NOT NULL);
         CREATE TABLE IF NOT EXISTS csweet_memory_uses(id uuid PRIMARY KEY,partition_key text NOT NULL,memory_id uuid NOT NULL,outcome integer NOT NULL,payload jsonb NOT NULL);
+        CREATE TABLE IF NOT EXISTS csweet_memory_transfers(id uuid PRIMARY KEY,tenant_id text NOT NULL,source_employee_id text NOT NULL,target_employee_id text NOT NULL,status integer NOT NULL,created_at timestamptz NOT NULL,payload jsonb NOT NULL);
+        CREATE INDEX IF NOT EXISTS ix_csweet_memory_transfer_employees ON csweet_memory_transfers(tenant_id,source_employee_id,target_employee_id,status);
         """;
 }

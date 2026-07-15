@@ -6,6 +6,9 @@ public enum MemoryTrustTier { External, AgentInference, UnconfirmedUser, Confirm
 public enum MemoryConfirmationState { NotRequired, Pending, Confirmed, Rejected }
 public enum MemorySensitivity { Public, Internal, Personal, Confidential, Restricted }
 public enum MemoryUseOutcome { Supplied, Cited, Accepted, Corrected, Rejected }
+public enum MemoryClaimKind { Fact, Observation, Decision, Commitment, WorkOutcome, Handoff, Feedback, Failure, SkillEvidence, OpenQuestion }
+public enum MemoryAudienceType { Organization, Team, Role, Employee, UserRelationship, Case, Conversation, Custom }
+public enum KnowledgeTransferStatus { PendingApproval, Approved, Rejected, Applied }
 
 public sealed record MemoryPartition(
     string TenantId,
@@ -23,6 +26,52 @@ public sealed record MemoryPartition(
 
 public sealed record MemorySource(string Type, string Id, string? Author = null);
 
+public sealed record MemoryPrincipal(
+    string TenantId,
+    string EmployeeId,
+    string? AgentDefinitionId = null,
+    string? InstallationId = null,
+    IReadOnlySet<string>? RoleIds = null,
+    IReadOnlySet<string>? TeamIds = null,
+    IReadOnlyDictionary<string, string>? Attributes = null);
+
+public sealed record MemoryWorkContext(
+    string? ObjectiveId = null,
+    string? TaskId = null,
+    string? CaseId = null,
+    string? RoleId = null,
+    string? TeamId = null);
+
+/// <summary>A reference to authoritative employee identity; the operational employee record remains outside memory.</summary>
+public sealed record MemoryEmployeeIdentity(
+    string EmployeeId,
+    string AgentDefinitionId,
+    string InstallationId,
+    DateTimeOffset EffectiveFrom,
+    DateTimeOffset? EffectiveTo = null);
+
+/// <summary>A temporal projection of an authoritative role assignment used for memory access and retrieval.</summary>
+public sealed record MemoryRoleAssignment(
+    string EmployeeId,
+    string RoleId,
+    string? TeamId,
+    DateTimeOffset EffectiveFrom,
+    DateTimeOffset? EffectiveTo = null);
+
+public sealed record MemoryOperationalReference(string Type, string Id, string? Version = null);
+
+public sealed record MemoryAccessContext(
+    MemoryPrincipal Principal,
+    string Purpose,
+    string Operation,
+    MemoryWorkContext? WorkContext = null);
+
+public sealed record MemoryNamespace(
+    MemoryPartition Partition,
+    MemoryScope Scope,
+    MemoryAudienceType Audience,
+    string AudienceId);
+
 public sealed record MemoryEpisode(
     Guid Id,
     MemoryPartition Partition,
@@ -36,7 +85,9 @@ public sealed record MemoryEpisode(
     string? IdempotencyKey = null,
     DateTimeOffset? ExpiresAt = null,
     bool LegalHold = false,
-    IReadOnlyDictionary<string, string>? Metadata = null);
+    IReadOnlyDictionary<string, string>? Metadata = null,
+    MemorySensitivity Sensitivity = MemorySensitivity.Internal,
+    IReadOnlyList<MemoryOperationalReference>? OperationalReferences = null);
 
 public sealed record MemoryEntity(
     Guid Id,
@@ -66,7 +117,8 @@ public sealed record MemoryClaim(
     DateTimeOffset? ValidTo,
     DateTimeOffset RecordedAt,
     Guid? SupersedesClaimId = null,
-    string? ExtractorVersion = null);
+    string? ExtractorVersion = null,
+    MemoryClaimKind Kind = MemoryClaimKind.Fact);
 
 public sealed record MemoryEdge(
     Guid Id,
@@ -152,3 +204,33 @@ public sealed record MemoryContextPacket(
     string RenderedContext,
     int EstimatedTokens,
     bool IsDegraded = false);
+
+public sealed record KnowledgeTransferItem(
+    Guid MemoryId,
+    MemoryPartition SourcePartition,
+    MemoryLayer Layer,
+    MemoryClaimKind Kind,
+    string Content,
+    MemorySensitivity Sensitivity,
+    MemoryTrustTier Trust,
+    IReadOnlyList<Guid> EpisodeIds,
+    string Citation);
+
+public sealed record KnowledgeTransferPackage(
+    Guid Id,
+    string TenantId,
+    string SourceEmployeeId,
+    string TargetEmployeeId,
+    IReadOnlyList<MemoryNamespace> SourceNamespaces,
+    MemoryNamespace TargetNamespace,
+    string Debrief,
+    IReadOnlyList<KnowledgeTransferItem> Items,
+    MemorySensitivity DebriefSensitivity,
+    KnowledgeTransferStatus Status,
+    DateTimeOffset CreatedAt,
+    string CreatedByEmployeeId,
+    string? ApprovedByEmployeeId = null,
+    DateTimeOffset? ApprovedAt = null,
+    DateTimeOffset? AppliedAt = null,
+    Guid? AppliedEpisodeId = null,
+    string? ApprovalNotes = null);

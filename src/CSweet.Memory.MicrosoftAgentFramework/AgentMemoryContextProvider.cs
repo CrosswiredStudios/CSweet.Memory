@@ -20,11 +20,17 @@ public static class AgentMemorySessionKeys
     public const string CustomNamespace = "CSweet.Memory.CustomNamespace";
     public const string Scope = "CSweet.Memory.Scope";
     public const string LastInvocationId = "CSweet.Memory.LastInvocationId";
+    public const string EmployeeId = "CSweet.Memory.EmployeeId";
+    public const string RoleIds = "CSweet.Memory.RoleIds";
+    public const string TeamIds = "CSweet.Memory.TeamIds";
+    public const string Purpose = "CSweet.Memory.Purpose";
 
     public static AgentSession ConfigureMemory(
         this AgentSession session,
         MemoryPartition partition,
-        MemoryScope scope = MemoryScope.User)
+        MemoryScope scope = MemoryScope.User,
+        MemoryPrincipal? principal = null,
+        string purpose = "agent-assistance")
     {
         session.StateBag.SetValue(TenantId, partition.TenantId);
         SetOptional(session, ApplicationId, partition.ApplicationId);
@@ -33,6 +39,10 @@ public static class AgentMemorySessionKeys
         SetOptional(session, ConversationId, partition.ConversationId);
         SetOptional(session, CustomNamespace, partition.CustomNamespace);
         session.StateBag.SetValue(Scope, scope.ToString());
+        session.StateBag.SetValue(EmployeeId, principal?.EmployeeId ?? partition.AgentId ?? partition.UserId ?? "unknown");
+        session.StateBag.SetValue(RoleIds, string.Join(',', principal?.RoleIds ?? new HashSet<string>()));
+        session.StateBag.SetValue(TeamIds, string.Join(',', principal?.TeamIds ?? new HashSet<string>()));
+        session.StateBag.SetValue(Purpose, purpose);
         return session;
     }
 
@@ -91,9 +101,10 @@ public sealed class AgentMemoryContextProvider : AIContextProvider
         {
             var session = context.Session ?? throw new InvalidOperationException("Durable memory requires an AgentSession.");
             var (partition, scope) = await _partitionResolver.ResolveAsync(session, cancellationToken);
+            var access = ResolveAccess(session, partition, "recall");
             var query = string.Join('\n', context.AIContext.Messages?.Select(message => message.Text).Where(text => !string.IsNullOrWhiteSpace(text)) ?? []);
             if (string.IsNullOrWhiteSpace(query)) return new AIContext();
-            var packet = await _memory.RecallAsync(new MemoryRecallRequest(partition, scope, query, TokenBudget: _options.ContextTokenBudget), cancellationToken);
+            var packet = await _memory.RecallAsync(new MemoryRecallRequest(partition, scope, query, TokenBudget: _options.ContextTokenBudget, Access: access), cancellationToken);
             session.StateBag.SetValue(AgentMemorySessionKeys.LastInvocationId, packet.InvocationId);
             return packet.Items.Count == 0
                 ? new AIContext()
@@ -109,21 +120,33 @@ public sealed class AgentMemoryContextProvider : AIContextProvider
     {
         try
         {
+            if (context.InvokeException is not null) return;
             var session = context.Session ?? throw new InvalidOperationException("Durable memory requires an AgentSession.");
             var (partition, scope) = await _partitionResolver.ResolveAsync(session, cancellationToken);
-            foreach (var message in context.RequestMessages.Where(message => !string.IsNullOrWhiteSpace(message.Text)))
+            var access = ResolveAccess(session, partition, "store-interaction");
+            var invocationId = session.StateBag.TryGetValue<string>(AgentMemorySessionKeys.LastInvocationId, out var storedInvocationId)
+                ? storedInvocationId : Guid.NewGuid().ToString("N");
+            var requestIndex = 0;
+            foreach (var message in context.RequestMessages.Where(IsDurableMessage))
             {
+                var sourceType = message.Role == ChatRole.User ? "user" : "tool";
+                var role = message.Role.ToString() ?? "unknown";
                 await _memory.IngestAsync(new MemoryIngestRequest(
-                    partition, scope, message.Text!, new MemorySource("user", Guid.NewGuid().ToString("N"), message.Role.ToString()),
-                    Metadata: new Dictionary<string, string> { ["role"] = message.Role.ToString() }), cancellationToken);
+                    partition, scope, message.Text!, new MemorySource(sourceType, $"{invocationId}:request:{requestIndex}", role),
+                    IdempotencyKey: $"maf:{invocationId}:request:{requestIndex++}",
+                    Metadata: new Dictionary<string, string> { ["role"] = role, ["invocationId"] = invocationId! }, Access: access,
+                    Sensitivity: sourceType == "user" ? MemorySensitivity.Personal : MemorySensitivity.Internal), cancellationToken);
             }
             if (_options.StoreAssistantMessages && context.ResponseMessages is not null)
             {
-                foreach (var message in context.ResponseMessages.Where(message => !string.IsNullOrWhiteSpace(message.Text)))
+                var responseIndex = 0;
+                foreach (var message in context.ResponseMessages.Where(message => !string.IsNullOrWhiteSpace(message.Text) && message.Role == ChatRole.Assistant))
                 {
+                    var role = message.Role.ToString() ?? "assistant";
                     await _memory.IngestAsync(new MemoryIngestRequest(
-                        partition, scope, message.Text!, new MemorySource("assistant", Guid.NewGuid().ToString("N"), message.Role.ToString()),
-                        Metadata: new Dictionary<string, string> { ["role"] = message.Role.ToString() }), cancellationToken);
+                        partition, scope, message.Text!, new MemorySource("assistant", $"{invocationId}:response:{responseIndex}", role),
+                        IdempotencyKey: $"maf:{invocationId}:response:{responseIndex++}",
+                        Metadata: new Dictionary<string, string> { ["role"] = role, ["invocationId"] = invocationId! }, Access: access), cancellationToken);
                 }
             }
         }
@@ -131,6 +154,28 @@ public sealed class AgentMemoryContextProvider : AIContextProvider
         {
         }
     }
+
+    private static bool IsDurableMessage(ChatMessage message) =>
+        !string.IsNullOrWhiteSpace(message.Text) &&
+        message.Role != ChatRole.System &&
+        message.Role != ChatRole.Assistant &&
+        !message.Text.TrimStart().StartsWith("<memory_context", StringComparison.OrdinalIgnoreCase);
+
+    private static MemoryAccessContext ResolveAccess(AgentSession session, MemoryPartition partition, string operation)
+    {
+        var employeeId = session.StateBag.TryGetValue<string>(AgentMemorySessionKeys.EmployeeId, out var storedEmployeeId)
+            ? storedEmployeeId ?? "unknown" : partition.AgentId ?? partition.UserId ?? "unknown";
+        var roleIds = ReadSet(session, AgentMemorySessionKeys.RoleIds);
+        var teamIds = ReadSet(session, AgentMemorySessionKeys.TeamIds);
+        var purpose = session.StateBag.TryGetValue<string>(AgentMemorySessionKeys.Purpose, out var storedPurpose)
+            ? storedPurpose ?? "agent-assistance" : "agent-assistance";
+        return new MemoryAccessContext(new MemoryPrincipal(partition.TenantId, employeeId, partition.AgentId, partition.ApplicationId, roleIds, teamIds), purpose, operation);
+    }
+
+    private static IReadOnlySet<string> ReadSet(AgentSession session, string key) =>
+        session.StateBag.TryGetValue<string>(key, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 }
 
 public static class AgentMemoryContextProviderServiceCollectionExtensions

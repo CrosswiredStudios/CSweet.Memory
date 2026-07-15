@@ -13,7 +13,11 @@ public sealed class SqliteMemoryStoreTests : IAsyncLifetime
     {
         _store = new SqliteMemoryStore(_path);
         await _store.InitializeAsync();
-        _engine = new MemoryEngine(_store, Options.Create(new AgentMemoryOptions { ContextTokenBudget = 500 }));
+        _engine = new MemoryEngine(
+            _store,
+            Options.Create(new AgentMemoryOptions { ContextTokenBudget = 500 }),
+            authorizer: new AllowAllMemoryScopeAuthorizer(),
+            redactor: new PassthroughMemoryRedactor());
     }
 
     public async Task DisposeAsync()
