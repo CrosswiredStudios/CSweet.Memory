@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><PackageId>CSweet.Memory.Abstractions</PackageId><Description>Vendor-neutral contracts for temporal agent memory.</Description></PropertyGroup>
+</Project>

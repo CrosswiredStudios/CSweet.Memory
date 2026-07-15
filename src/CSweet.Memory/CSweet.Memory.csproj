@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><PackageId>CSweet.Memory</PackageId><Description>Temporal ingestion, consolidation, retrieval, and context composition for agents.</Description></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CSweet.Memory.Abstractions/CSweet.Memory.Abstractions.csproj" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+</Project>

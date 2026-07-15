@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><PackageId>CSweet.Memory.Sqlite</PackageId><Description>Zero-configuration SQLite Integrated store for CSweet.Memory.</Description></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CSweet.Memory/CSweet.Memory.csproj" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><PackageId>CSweet.Memory.Connectors.Mem0</PackageId><Description>Mem0 connector for CSweet.Memory.</Description></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CSweet.Memory/CSweet.Memory.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+  </ItemGroup>
+</Project>

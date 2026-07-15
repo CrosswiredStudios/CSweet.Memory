@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><PackageId>CSweet.Memory.Connectors.Neo4j</PackageId><Description>Neo4j temporal graph connector for CSweet.Memory.</Description></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CSweet.Memory/CSweet.Memory.csproj" />
+    <PackageReference Include="Neo4j.Driver" />
+  </ItemGroup>
+</Project>

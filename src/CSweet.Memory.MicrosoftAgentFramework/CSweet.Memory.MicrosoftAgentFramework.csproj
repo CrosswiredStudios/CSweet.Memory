@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><PackageId>CSweet.Memory.MicrosoftAgentFramework</PackageId><Description>Microsoft Agent Framework AIContextProvider for CSweet.Memory.</Description></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CSweet.Memory/CSweet.Memory.csproj" />
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+  </ItemGroup>
+</Project>
