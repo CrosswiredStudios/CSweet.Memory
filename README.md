@@ -51,3 +51,17 @@ package = await memory.ApplyKnowledgeTransferAsync(
 ```
 
 The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` currently targets .NET 10 because the C-Sweet Agent SDK targets .NET 10. All packages are licensed under Apache-2.0.
+
+## Creating NuGet packages
+
+Run the batch file from the repository root to restore published dependencies, run the test suite, and create all six packages in a versioned directory such as `artifacts\packages\0.1.1`:
+
+```bat
+Create-NuGetPackages.bat
+```
+
+Pass a version and optional output root to override the repository defaults. The version directory is appended automatically, so this example writes to `C:\packages\csweet-memory\0.1.2`:
+
+```bat
+Create-NuGetPackages.bat 0.1.2 C:\packages\csweet-memory
+```
