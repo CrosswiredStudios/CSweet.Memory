@@ -1,7 +1,5 @@
 using System.Text.Json;
-using CSweet.Agent.Contracts.Grpc;
 using CSweet.Agent.SDK;
-using Google.Protobuf;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CSweet.Memory;
@@ -16,12 +14,13 @@ public static class CSweetMemoryCapabilities
 
 public sealed record CSweetMemoryCommand(string Operation, JsonElement Payload);
 
-public sealed class CSweetBrokerMemoryStore : IMemoryStore, IKnowledgeTransferStore
+public sealed class CSweetPlatformMemoryStore : IMemoryStore, IKnowledgeTransferStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly IAgentBrokerClient _broker;
+    private readonly AgentPlatformAccessor? _platform;
+    private readonly PlatformCapabilityClient? _directPlatform;
 
-    public CSweetBrokerMemoryStore(IAgentBrokerClient broker) => _broker = broker;
+    public CSweetPlatformMemoryStore(AgentPlatformAccessor platform) => _platform = platform;
+    public CSweetPlatformMemoryStore(PlatformCapabilityClient platform) => _directPlatform = platform;
 
     public MemoryStoreCapabilities Capabilities => MemoryStoreCapabilities.Transactions |
         MemoryStoreCapabilities.FullText | MemoryStoreCapabilities.NativeVectors |
@@ -56,26 +55,27 @@ public sealed class CSweetBrokerMemoryStore : IMemoryStore, IKnowledgeTransferSt
 
     private async Task<T> InvokeAsync<T>(string capability, string operation, object payload, CancellationToken cancellationToken)
     {
-        var command = new CSweetMemoryCommand(operation, JsonSerializer.SerializeToElement(payload, JsonOptions));
-        var request = new RequestCapability
+        var access = capability switch
         {
-            RequestId = Guid.NewGuid().ToString("N"),
-            Capability = capability,
-            ContentType = "application/json",
-            Payload = ByteString.CopyFrom(JsonSerializer.SerializeToUtf8Bytes(command, JsonOptions))
+            CSweetMemoryCapabilities.Query => "query",
+            CSweetMemoryCapabilities.Write => "write",
+            CSweetMemoryCapabilities.Manage => "manage",
+            CSweetMemoryCapabilities.Export => "export",
+            _ => throw new InvalidOperationException($"Unsupported C-Sweet memory capability '{capability}'.")
         };
-        var result = await _broker.InvokeCapabilityAsync(request, request.RequestId, cancellationToken);
-        if (!result.Succeeded) throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? $"C-Sweet memory capability '{capability}' failed." : result.Error);
-        return JsonSerializer.Deserialize<T>(result.Payload.Span, JsonOptions)
-            ?? throw new InvalidOperationException($"C-Sweet memory capability '{capability}' returned an empty payload.");
+        return await (_directPlatform ?? _platform!.Current).Memory.ExecuteAsync<T>(
+            access,
+            operation,
+            payload,
+            cancellationToken);
     }
 }
 
 public static class CSweetAgentMemoryBuilderExtensions
 {
-    public static AgentMemoryBuilder UseCSweetBroker(this AgentMemoryBuilder builder)
+    public static AgentMemoryBuilder UseCSweetPlatform(this AgentMemoryBuilder builder)
     {
-        builder.Services.AddSingleton<IMemoryStore, CSweetBrokerMemoryStore>();
+        builder.Services.AddSingleton<IMemoryStore, CSweetPlatformMemoryStore>();
         return builder;
     }
 }
