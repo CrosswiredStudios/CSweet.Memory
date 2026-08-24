@@ -1,0 +1,75 @@
+name: publish-nuget
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Directory.Build.props
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nuget-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref_type == 'tag' || github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Read and verify package version
+        id: package
+        shell: pwsh
+        run: |
+          $props = [xml](Get-Content Directory.Build.props)
+          $version = [string]$props.Project.PropertyGroup.Version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Version must be defined in Directory.Build.props."
+          }
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $tagVersion = '${{ github.ref_name }}'.TrimStart('v')
+            if ($tagVersion -ne $version) {
+              throw "Tag version $tagVersion does not match package version $version."
+            }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+      - run: dotnet restore CSweet.Memory.slnx -p:UseLocalCSweetAgentSdk=false
+      - run: dotnet build CSweet.Memory.slnx --configuration Release --no-restore -p:UseLocalCSweetAgentSdk=false
+      - run: dotnet test CSweet.Memory.slnx --configuration Release --no-build --no-restore -p:UseLocalCSweetAgentSdk=false
+      - run: dotnet pack CSweet.Memory.slnx --configuration Release --no-build --no-restore -p:UseLocalCSweetAgentSdk=false --output artifacts/packages
+      - name: Publish packages to NuGet.org
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
+            throw "The NUGET_API_KEY repository secret is not configured."
+          }
+          Get-ChildItem artifacts/packages -Filter *.nupkg |
+            Where-Object Extension -eq '.nupkg' |
+            ForEach-Object {
+              dotnet nuget push $_.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+              if ($LASTEXITCODE -ne 0) { throw "NuGet push failed for $($_.Name)." }
+            }
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          gh release view $env:RELEASE_TAG --repo '${{ github.repository }}' *> $null
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          gh release create $env:RELEASE_TAG --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "C-Sweet Memory $env:PACKAGE_VERSION" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release creation failed." }

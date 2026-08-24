@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore CSweet.Memory.slnx -p:UseLocalCSweetAgentSdk=false
+      - run: dotnet build CSweet.Memory.slnx --configuration Release --no-restore -p:UseLocalCSweetAgentSdk=false
+      - run: dotnet test CSweet.Memory.slnx --configuration Release --no-build --no-restore -p:UseLocalCSweetAgentSdk=false
+      - run: dotnet pack CSweet.Memory.slnx --configuration Release --no-build --no-restore -p:UseLocalCSweetAgentSdk=false --output artifacts/packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/packages/*.*nupkg
