@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write  # required for NuGet trusted publishing (OIDC)
 
 concurrency:
   group: nuget-publish-${{ github.ref }}
@@ -48,14 +49,16 @@ jobs:
       - run: dotnet build CSweet.Memory.slnx --configuration Release --no-restore -p:UseLocalCSweetAgentSdk=false
       - run: dotnet test CSweet.Memory.slnx --configuration Release --no-build --no-restore -p:UseLocalCSweetAgentSdk=false
       - run: dotnet pack CSweet.Memory.slnx --configuration Release --no-build --no-restore -p:UseLocalCSweetAgentSdk=false --output artifacts/packages
+      - name: NuGet login (OIDC -> temporary API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
       - name: Publish packages to NuGet.org
         shell: pwsh
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
-            throw "The NUGET_API_KEY repository secret is not configured."
-          }
           Get-ChildItem artifacts/packages -Filter *.nupkg |
             Where-Object Extension -eq '.nupkg' |
             ForEach-Object {
