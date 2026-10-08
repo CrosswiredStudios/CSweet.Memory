@@ -50,6 +50,7 @@ public sealed partial class SqliteMemoryStore
         var sources = await LoadLineageSourcesAsync(partition, candidates.SelectMany(x => x.EpisodeIds), cancellationToken, asOf);
         return candidates.Select(candidate => MemoryProvenance.ResolveSensitivity(partition, candidate.Sensitivity,
                 candidate.EpisodeIds, sources, asOf, candidate.RetrievalChannel == "graph" ? MemoryGraphTraversal.MaximumCandidateSources : 3 * MemoryProvenance.MaximumSourceEpisodes + 1) is { } sensitivity
-            ? candidate with { Sensitivity = sensitivity } : null).OfType<MemoryCandidate>().ToArray();
+            ? candidate with { Sensitivity = sensitivity, RequiredSharedPartitions =
+                MemorySharedAudiences.FromSources(candidate.EpisodeIds.Select(id => sources[id])) is { Length: > 0 } required ? required : null } : null).OfType<MemoryCandidate>().ToArray();
     }
 }

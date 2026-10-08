@@ -220,7 +220,7 @@ public sealed partial class RevisionHistoryTests
             var path = Path.Combine(Path.GetTempPath(), $"memory-history-{Guid.NewGuid():N}.db");
             var schema = $"memory_history_{Guid.NewGuid():N}";
             var connection = provider == "postgres"
-                ? new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("CSWEET_MEMORY_TEST_POSTGRES")) { SearchPath = schema, Pooling = false }.ConnectionString
+                ? new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("CSWEET_MEMORY_TEST_POSTGRES")) { SearchPath = schema, Pooling = true, MaxPoolSize = 8 }.ConnectionString
                 : new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ConnectionString;
             var fixture = new Fixture(provider, path, schema, connection);
             if (fixture.Postgres) await fixture.Sql($"CREATE SCHEMA {schema}");
@@ -248,7 +248,11 @@ public sealed partial class RevisionHistoryTests
         }
         public async ValueTask DisposeAsync()
         {
-            if (Postgres) await Sql($"DROP SCHEMA {schema} CASCADE");
+            if (Postgres)
+            {
+                try { await Sql($"DROP SCHEMA {schema} CASCADE"); }
+                finally { using var connection = new NpgsqlConnection(connectionString); NpgsqlConnection.ClearPool(connection); }
+            }
             else foreach (var suffix in new[] { "", "-wal", "-shm" }) File.Delete(path + suffix);
         }
     }

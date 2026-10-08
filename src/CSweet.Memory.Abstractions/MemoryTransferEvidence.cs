@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CSweet.Memory;
 
@@ -11,6 +12,9 @@ public sealed record MemoryTransferRecord(MemoryPartition Partition, MemoryRecor
 public sealed record MemoryTransferEvidence(Guid PackageId, string PackageFingerprint, IReadOnlyList<MemoryTransferRecord> Records, bool LegalHold = false)
 {
     public const int MaximumRecords = 512;
+    /// <summary>Verified shared restrictions inherited by this copy; never an access grant.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<MemoryPartition>? RequiredSharedPartitions { get; init; }
     /// <summary>Canonical approved content, independent of the host's newline convention.</summary>
     public static string RenderContent(KnowledgeTransferPackage package)
     {

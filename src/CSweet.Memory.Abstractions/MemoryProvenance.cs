@@ -44,7 +44,7 @@ public static class MemoryProvenance
 
     public static bool IsCurrent(MemoryEpisode? source, MemoryPartition partition, Guid id, DateTimeOffset asOf) =>
         IsSnapshotCurrent(source, partition, id, asOf) &&
-        ((source!.TransferEvidence is null && !string.Equals(source.Source.Type, "knowledge-transfer", StringComparison.OrdinalIgnoreCase)) || source.TransferEvidenceVerified);
+        ((source!.TransferEvidence is null && source.CorrectionEvidence is null && !string.Equals(source.Source.Type, "knowledge-transfer", StringComparison.OrdinalIgnoreCase)) || source.TransferEvidenceVerified);
 
     internal static bool IsSnapshotCurrent(MemoryEpisode? source, MemoryPartition partition, Guid id, DateTimeOffset asOf) =>
         source is not null && !source.IsSuppressed && source.Id == id && source.Partition == partition &&

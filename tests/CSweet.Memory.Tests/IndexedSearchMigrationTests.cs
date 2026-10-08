@@ -58,7 +58,7 @@ public sealed class IndexedSearchMigrationTests
             {
                 foreach (var table in new[] { "entities", "claims", "procedures" })
                     await Sql($"DROP TRIGGER memory_{table}_fts_insert; DROP TRIGGER memory_{table}_fts_update; DROP TRIGGER memory_{table}_fts_delete; DROP TABLE memory_{table}_fts;");
-                await Sql("DELETE FROM memory_schema_migrations WHERE id='indexed-search-v1'");
+                await Sql("DELETE FROM memory_schema_migrations WHERE id IN ('indexed-search-v1','decoded-entity-aliases-v2')");
             }
             await using var upgraded = OpenStore();
             await using var concurrent = OpenStore();

@@ -138,11 +138,30 @@ internal static partial class MemoryErasureStorage
         var knownIds = rows.Select(x => x.Key.Id).ToHashSet();
         var versionsByKey = rows.GroupBy(x => x.Key).ToDictionary(x => x.Key, x => x.ToArray());
         string? blocked = null;
+        var transferEvidence = new MemoryTransferEvidenceStorage(sql => Command(connection, transaction, sql), postgres, DateTimeOffset.UtcNow);
         foreach (var key in dependencies)
         {
             var current = latest[key];
             if (current.Held) { blocked = "memory_legal_hold_prevents_deletion"; break; }
-            if (current.Unresolved || versionsByKey[key].Any(x => x.Required.Any(id => !knownIds.Contains(id))))
+            var unresolved = current.Unresolved;
+            if (key.Kind == MemoryErasureKind.Episode)
+            {
+                var episode = JsonSerializer.Deserialize<MemoryEpisode>(current.Payload, Json)!;
+                if ((episode.CorrectionEvidence is not null || episode.SourceFingerprint?.StartsWith("sha256-v3:", StringComparison.Ordinal) == true) &&
+                    !await transferEvidence.VerifyCorrectionRetentionAsync(episode, token)) unresolved = true;
+            }
+            if (unresolved && key.Kind == MemoryErasureKind.Episode && current.SourceType == "knowledge-transfer")
+            {
+                var copy = JsonSerializer.Deserialize<MemoryEpisode>(current.Payload, Json)!;
+                using var payload = JsonDocument.Parse(current.Payload);
+                // Empty selected records are valid for an approved notes-only handoff.
+                // Require its live package, exact sealed certificate and canonical
+                // audience closure instead of treating an empty list as proof itself.
+                if (copy.TransferEvidence?.Records is { Count: 0 } && MemorySourceIntegrity.IsVerified(copy) &&
+                    payload.RootElement.TryGetProperty("legalHold", out var legalHold) && legalHold.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    unresolved = !await transferEvidence.VerifyNotesOnlyRetentionAsync(copy, token);
+            }
+            if (unresolved || versionsByKey[key].Any(x => x.Required.Any(id => !knownIds.Contains(id))))
                 blocked = "memory_erasure_lineage_review_required";
         }
         var affectedPartitions = selected.Select(x => x.Partition).ToHashSet();

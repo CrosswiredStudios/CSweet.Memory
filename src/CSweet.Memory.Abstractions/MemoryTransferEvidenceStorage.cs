@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace CSweet.Memory;
 
-internal sealed class MemoryTransferEvidenceStorage(Func<string, DbCommand> commandFactory, bool postgres, DateTimeOffset asOf)
+internal sealed partial class MemoryTransferEvidenceStorage(Func<string, DbCommand> commandFactory, bool postgres, DateTimeOffset asOf)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly string[] Tables = ["episodes", "entities", "claims", "edges", "blocks", "procedures"];
@@ -35,9 +35,11 @@ internal sealed class MemoryTransferEvidenceStorage(Func<string, DbCommand> comm
                 Kind(root) != item.Kind || item.Citation != $"memory:{item.MemoryId:N}") throw Invalid();
         }
         if (selected.Count > MemoryTransferEvidence.MaximumRecords) throw Invalid();
+        var restrictions = SharedRestrictions(package, selected.Values);
         return new(package.Id, MemoryTransferEvidence.Fingerprint(package), selected.Values.Select(x => x.Reference)
             .OrderBy(x => x.Partition.StorageKey, StringComparer.Ordinal).ThenBy(x => x.Kind).ThenBy(x => x.Id).ToArray(),
-            selected.Values.Any(x => x.Reference.Kind == MemoryRecordKind.Episode && x.Payload.GetProperty("legalHold").GetBoolean()));
+            selected.Values.Any(x => x.Reference.Kind == MemoryRecordKind.Episode && x.Payload.GetProperty("legalHold").GetBoolean()))
+            { RequiredSharedPartitions = restrictions.Length == 0 ? null : restrictions };
     }
 
     internal async Task<MemoryEpisode> ResolveAsync(MemoryEpisode episode, CancellationToken token)
@@ -47,23 +49,67 @@ internal sealed class MemoryTransferEvidenceStorage(Func<string, DbCommand> comm
         { return episode with { TransferEvidenceVerified = false }; }
     }
 
+    // Retention verification does not establish recall eligibility. Suppressed,
+    // expired or revoked notes-only copies still need an exact live certificate
+    // before a trusted coordinator may erase them or review a hold release.
+    internal async Task<bool> VerifyNotesOnlyRetentionAsync(MemoryEpisode episode, CancellationToken token)
+    {
+        try
+        {
+            if (!MemorySourceIntegrity.IsVerified(episode) || episode.TransferEvidence?.Records is not { Count: 0 }) return false;
+            var evidence = episode.TransferEvidence;
+            var package = await PackageAsync(evidence.PackageId, token);
+            if (!MatchesAppliedCertificate(episode, package, allowRejected: true) || package!.Items.Count != 0 ||
+                evidence.LegalHold || episode.Sensitivity < package.DebriefSensitivity) return false;
+            var required = SharedRestrictions(package, []);
+            return required.Length == 0 ? evidence.RequiredSharedPartitions is null :
+                evidence.RequiredSharedPartitions is not null && required.SequenceEqual(evidence.RequiredSharedPartitions);
+        }
+        catch (Exception error) when (error is JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException or NullReferenceException)
+        { return false; }
+    }
+
+    private bool MatchesAppliedCertificate(MemoryEpisode episode, KnowledgeTransferPackage? package, bool allowRejected)
+    {
+        var evidence = episode.TransferEvidence;
+        return evidence is not null && package is not null && package.Id == evidence.PackageId && ValidAudience(package) &&
+            (package.Status == KnowledgeTransferStatus.Applied || allowRejected && package.Status == KnowledgeTransferStatus.Rejected) &&
+            episode.Source == new MemorySource("knowledge-transfer", package.Id.ToString("D"), package.SourceEmployeeId) &&
+            episode.Content == MemoryTransferEvidence.RenderContent(package) && package.AppliedEpisodeId == episode.Id &&
+            package.TargetNamespace.Partition == episode.Partition && package.TargetNamespace.Scope == episode.Scope &&
+            package.AppliedAt is not null && package.AppliedAt <= asOf &&
+            evidence.PackageFingerprint == MemoryTransferEvidence.Fingerprint(package) && package.ApprovedEvidence is not null &&
+            JsonSerializer.Serialize(package.ApprovedEvidence, Json) == JsonSerializer.Serialize(evidence, Json);
+    }
+
     internal async Task EnsureDeletionAllowedAsync(MemoryPartition partition, CancellationToken token)
     {
-        var predicate = postgres ? "payload->>'transferEvidence' IS NOT NULL OR lower(payload->'source'->>'type')='knowledge-transfer'"
-            : "json_extract(payload,'$.transferEvidence') IS NOT NULL OR lower(json_extract(payload,'$.source.type'))='knowledge-transfer'";
+        var predicate = postgres ? "payload->>'transferEvidence' IS NOT NULL OR payload->>'correctionEvidence' IS NOT NULL OR payload->>'sourceFingerprint' LIKE 'sha256-v3:%' OR lower(payload->'source'->>'type')='knowledge-transfer'"
+            : "json_extract(payload,'$.transferEvidence') IS NOT NULL OR json_extract(payload,'$.correctionEvidence') IS NOT NULL OR json_extract(payload,'$.sourceFingerprint') LIKE 'sha256-v3:%' OR lower(json_extract(payload,'$.source.type'))='knowledge-transfer'";
         await using var command = commandFactory($"SELECT CAST(payload AS text) FROM {Prefix}episodes WHERE partition_key=@partition AND ({predicate}) LIMIT 8193");
         Add(command, "partition", partition.StorageKey);
         var episodes = new List<MemoryEpisode>();
         await using (var reader = await command.ExecuteReaderAsync(token))
             while (await reader.ReadAsync(token)) episodes.Add(JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(0), Json)!);
         if (episodes.Count > MemoryProvenance.MaximumReadSourceEpisodes) throw new InvalidOperationException("memory_transfer_retention_review_required");
-        foreach (var episode in episodes)
+        // Resolve correction retention first so a live upstream hold cannot be hidden
+        // behind a copied record's now-stale recall revision.
+        foreach (var episode in episodes.Where(x => x.CorrectionEvidence is not null))
+        {
+            if (!await VerifyCorrectionRetentionAsync(episode, token))
+                throw new InvalidOperationException("memory_transfer_retention_review_required");
+            if (cache.Values.Any(x => x?.Reference.Kind == MemoryRecordKind.Episode && x.Payload.GetProperty("legalHold").GetBoolean()))
+                throw new InvalidOperationException("memory_legal_hold_prevents_deletion");
+        }
+        foreach (var episode in episodes.Where(x => x.CorrectionEvidence is null))
             if (episode.TransferEvidence is null || episode.TransferEvidence.LegalHold || !(await ResolveAsync(episode, token)).TransferEvidenceVerified)
                 throw new InvalidOperationException("memory_transfer_retention_review_required");
     }
 
     private async Task<bool> VerifyAsync(MemoryEpisode episode, HashSet<Guid> path, int depth, CancellationToken token)
     {
+        if (episode.CorrectionEvidence is not null) return await VerifyCorrectionAsync(episode, path, depth, false, token);
+        if (episode.SourceFingerprint?.StartsWith("sha256-v3:", StringComparison.Ordinal) == true) return false;
         if (episode.TransferEvidence is null) return !string.Equals(episode.Source.Type, "knowledge-transfer", StringComparison.OrdinalIgnoreCase);
         if (depth >= 3 || !path.Add(episode.Id) || !MemoryProvenance.IsSnapshotCurrent(episode, episode.Partition, episode.Id, asOf)) return false;
         try
@@ -71,28 +117,25 @@ internal sealed class MemoryTransferEvidenceStorage(Func<string, DbCommand> comm
             var evidence = episode.TransferEvidence;
             if (evidence.Records is null || evidence.Records.Count > MemoryTransferEvidence.MaximumRecords) return false;
             var package = await PackageAsync(evidence.PackageId, token);
-            if (package is null || package.Id != evidence.PackageId || !ValidAudience(package) || package.Status != KnowledgeTransferStatus.Applied ||
-                episode.Source != new MemorySource("knowledge-transfer", package.Id.ToString("D"), package.SourceEmployeeId) ||
-                episode.Content != MemoryTransferEvidence.RenderContent(package) ||
-                package.AppliedEpisodeId != episode.Id || package.TargetNamespace.Partition != episode.Partition ||
-                package.TargetNamespace.Scope != episode.Scope || package.AppliedAt is null || package.AppliedAt > asOf ||
-                evidence.PackageFingerprint != MemoryTransferEvidence.Fingerprint(package) ||
-                package.ApprovedEvidence is null || JsonSerializer.Serialize(package.ApprovedEvidence, Json) != JsonSerializer.Serialize(evidence, Json)) return false;
+            if (package is null || !MatchesAppliedCertificate(episode, package, allowRejected: false)) return false;
             var records = new Dictionary<(MemoryPartition, MemoryRecordKind, Guid), Snapshot>();
             foreach (var reference in evidence.Records)
             {
-                if (reference is null || reference.Revision <= 0 || !package.SourceNamespaces.Any(x => x.Partition == reference.Partition)) return false;
+                if (reference is null || reference.Revision <= 0 || !package!.SourceNamespaces.Any(x => x.Partition == reference.Partition)) return false;
                 var row = await LoadAsync(reference.Partition, reference.Kind, reference.Id, token);
                 if (row is null || row.Reference.Revision != reference.Revision || !records.TryAdd((reference.Partition, reference.Kind, reference.Id), row) ||
                     !await CurrentAsync(row, path, depth + 1, token)) return false;
             }
             foreach (var row in records.Values)
                 if (Dependencies(row).Any(key => !records.ContainsKey(key))) return false;
-            foreach (var item in package.Items)
+            foreach (var item in package!.Items)
             {
                 var root = await RootAsync(item, token);
                 if (root is null || !records.ContainsKey((root.Reference.Partition, root.Reference.Kind, root.Reference.Id))) return false;
             }
+            var restrictions = SharedRestrictions(package, records.Values);
+            if (restrictions.Length == 0 ? evidence.RequiredSharedPartitions is not null :
+                evidence.RequiredSharedPartitions is null || !restrictions.SequenceEqual(evidence.RequiredSharedPartitions)) return false;
             return (!evidence.LegalHold || episode.LegalHold) &&
                 episode.Sensitivity >= records.Values.Select(Sensitivity).Concat(package.Items.Select(x => x.Sensitivity))
                     .Append(package.DebriefSensitivity).Max();
@@ -113,6 +156,12 @@ internal sealed class MemoryTransferEvidenceStorage(Func<string, DbCommand> comm
     private static IEnumerable<(MemoryPartition, MemoryRecordKind, Guid)> Dependencies(Snapshot row)
     {
         var value = row.Payload; var partition = row.Reference.Partition;
+        if (row.Reference.Kind == MemoryRecordKind.Episode && value.TryGetProperty("correctionEvidence", out var correction) && correction.ValueKind != JsonValueKind.Null)
+        {
+            var evidence = correction.Deserialize<MemoryCorrectionEvidence>(Json) ?? throw Invalid();
+            if (evidence.Sources is not { Count: > 0 and <= MemoryProvenance.MaximumSourceEpisodes }) throw Invalid();
+            foreach (var source in evidence.Sources) yield return (partition, MemoryRecordKind.Episode, source.EpisodeId);
+        }
         if (value.TryGetProperty("sourceEpisodeIds", out var ids))
         {
             if (ids.ValueKind != JsonValueKind.Array || ids.GetArrayLength() > MemoryProvenance.MaximumSourceEpisodes) throw Invalid();
@@ -248,11 +297,19 @@ internal sealed class MemoryTransferEvidenceStorage(Func<string, DbCommand> comm
                 ns.Partition == new MemoryPartition(tenant, app, employee, CustomNamespace: $"employee:{employee}"),
             MemoryAudienceType.UserRelationship => !string.IsNullOrWhiteSpace(ns.AudienceId) && ns.Scope == MemoryScope.User &&
                 ns.Partition == new MemoryPartition(tenant, app, employee, ns.AudienceId, CustomNamespace: $"relationship:{employee}:{ns.AudienceId}"),
+            MemoryAudienceType.Team or MemoryAudienceType.Role => allowOrganization && ns.Scope == MemoryScope.Custom &&
+                MemorySharedAudiences.IsCanonical(ns.Partition) && ns.Partition.TenantId == tenant &&
+                ns.Partition.CustomNamespace == (ns.Audience == MemoryAudienceType.Team ? "team:" : "role:") + ns.AudienceId,
             MemoryAudienceType.Organization => allowOrganization && ns.Scope == MemoryScope.Tenant && ns.AudienceId == tenant &&
                 ns.Partition == new MemoryPartition(tenant, app, CustomNamespace: "organization"),
             _ => false
         };
     }
+
+    private static MemoryPartition[] SharedRestrictions(KnowledgeTransferPackage package, IEnumerable<Snapshot> records) =>
+        MemorySharedAudiences.Merge(package.SourceNamespaces.Where(x => x.Audience is MemoryAudienceType.Team or MemoryAudienceType.Role)
+            .Select(x => x.Partition).Concat(MemorySharedAudiences.FromSources(records.Where(x => x.Reference.Kind == MemoryRecordKind.Episode)
+                .Select(x => x.Payload.Deserialize<MemoryEpisode>(Json) ?? throw Invalid()))));
 
     private static void Add(DbCommand command, string name, object value)
     { var parameter = command.CreateParameter(); parameter.ParameterName = name; parameter.Value = value; command.Parameters.Add(parameter); }

@@ -1,6 +1,68 @@
 # CSweet.Memory
 
-## Core review state (unpublished 0.2.0)
+## Shared-source transfers (unpublished 0.3.0)
+
+All six packages use **0.3.0**. Canonical `EmployeeMemoryNamespaces.Team` and `Role`
+namespaces may be transfer sources; recipients remain employee or own-relationship
+namespaces. `MemoryTransferEvidence.RequiredSharedPartitions` is verified against the
+source snapshot and inherited through nested copies, including notes-only handoffs.
+Absent restrictions stay omitted from JSON, preserving existing native fingerprints.
+
+Database retrieval exposes these restrictions on `MemoryCandidate`. `MemoryEngine`
+checks its authorizer for every required shared partition before recall, export, claim confirmation, approval
+and application. `MemoryAudienceProjection.Create` removes inaccessible copies and their
+contributor-dependent entities, claims, edges, blocks, procedures and embeddings. It also
+refuses copied episodes with invalid source fingerprints, including stripped metadata.
+
+Store APIs are trusted raw storage APIs; hosts must authorize current recipients and
+reviewers, inspect inherited restrictions and recheck authority before delivery and writes.
+Deploy the matching platform, library and broker packages together and restart old runtimes.
+The C-Sweet integration binds membership changes to review tokens and rechecks membership
+during inspection, review, retry, retention, extraction and provider dispatch. It currently
+refuses corrections that would create a separate unrestricted episode from shared evidence.
+Database schema and historical partition migration requirements remain unchanged.
+
+Notes-only erasure verifies the retained certificate independently of recall eligibility.
+Suppressed, expired or revoked copies and their nested copies can be forgotten through
+the authorized platform review workflow without restoring recall. Missing legal-hold
+metadata, active holds, changed certificates or missing live packages remain blockers.
+Current reviewer/recipient membership is still required for preview, writes and replay.
+
+`MemoryEpisode.CorrectionEvidence` records bounded human-review ancestry using the
+contributors' immutable fingerprints and their exact inherited shared audience closure.
+Both stores implement `IMemoryCorrectionEvidenceStore.CaptureCorrectionEvidenceAsync`:
+capture verifies current sources and reserves ancestry depth before a new episode is written.
+The optional evidence uses a v3 source fingerprint; native v1 and transfer v2 JSON and
+fingerprints remain unchanged when it is absent. Stripping or changing ancestry cannot
+turn the correction into independent readable evidence.
+
+Retrieval, dependent records, export projection and later transfers enforce this ancestry.
+Source suppression, expiry or transfer revocation withholds the correction and its copies.
+Retention verification preserves source holds and permits verified erasure without restoring
+recall. A host must create corrections atomically with human review receipts and authorize
+every current inherited audience; a library fingerprint does not prove human authority.
+The C-Sweet correction write guard remains in place while the human correction workflow,
+replacement-target replay and complete platform lifecycle integration are being verified.
+
+## Retrieval maintenance (unpublished 0.2.1)
+
+The retrieval maintenance introduced in 0.2.1 remains included in 0.3.0. `SqliteMemoryStore.UpgradeEntityAliasIndexAsync` applies
+`decoded-entity-aliases-v2`: it decodes text aliases with `json_each`, replaces the entity index
+triggers and rebuilds populated FTS rows under one writer transaction. Existing entity IDs,
+payloads, source links and revision history remain intact; failure rolls back the upgrade and
+reinitialization retries it. Legacy payload-only writers are indexed by the updated triggers.
+The ordinary canonical partition migration requirements below still apply.
+
+`PostgreSqlMemoryStore.SearchAsync` normalizes episodic cover-density rank by document length,
+so repeated or incidental mentions in longer episodes do not automatically crowd out a concise
+match at the candidate limit. Source suppression and valid-time filters still run before the
+limit. This ranking change does not establish answer correctness for an ambiguous identifier.
+
+`LexicalRetrievalRegressionTests` covers fresh Unicode aliases, updates, identifier density,
+future/expired distractors, populated upgrade, injected rollback, concurrent initialization,
+legacy writes and restart. Use matching 0.3.0 packages in consumers; publication remains separate.
+
+## Core review state (unpublished 0.2.1)
 
 `MemoryBlock.Confirmation` now carries explicit review state. Both stores exclude rejected and
 unknown states from search, and include pending blocks only for explicit pending searches. Safe
@@ -16,7 +78,7 @@ Deploy the matching rebuilt draft packages together: older readers ignore this n
 not compatible with reviewed core blocks. No live mixed-version rollback is supported; quiesce
 writers and use the documented snapshot/restore release procedure. No packages are published yet.
 
-## Transfer evidence (unpublished 0.2.0)
+## Transfer evidence (unpublished 0.2.1)
 
 `IMemoryTransferEvidenceStore.CaptureTransferEvidenceAsync` validates the selected content,
 classification, citations and complete source closure before approval. `MemoryTransferEvidence`
@@ -55,7 +117,7 @@ so. Incomplete standalone applications remain withheld. Generic proposal/transfe
 other review types and full lifecycle/release gates remain open; this does not complete P0.
 See C-Sweet's `docs/implementation/features/agent-memory-hardening.md` for the current register.
 
-## Source fingerprints and graph evidence (unpublished 0.2.0)
+## Source fingerprints and graph evidence (unpublished 0.2.1)
 
 New episode writes receive a server-computed `SourceFingerprint`, ignoring caller-supplied
 values. `MemorySourceIntegrity` hashes a fixed v1 shape containing the exact partition,
@@ -84,7 +146,7 @@ bounded to 1,155 IDs and rechecked before return. The existing 8,192 distinct-so
 ceiling still applies; overflow withholds dependent results. These bounds can reduce recall
 on large graphs; production-scale quality/latency evaluation remains a release gate.
 
-## Database revision history (unpublished 0.2.0)
+## Database revision history (unpublished 0.2.1)
 
 SQLite and PostgreSQL now preserve snapshots for episodes, entities, claims, edges, core
 blocks, procedures and embeddings. The additive `revision-history-v1` upgrade runs after
@@ -122,7 +184,7 @@ rollback. Use the pre-upgrade backup in a stopped environment and separately rec
 writes. The migration's baseline scan and extra write/storage cost still need deployment-scale
 rehearsal; no production migration or package publication has occurred.
 
-## Additional derivative evidence (unpublished 0.2.0)
+## Additional derivative evidence (unpublished 0.2.1)
 
 `MemoryClaim`, `MemoryEdge` and `ProceduralMemory` now also carry `SourceEpisodeIds`.
 These additive JSON fields identify up to 128 additional contributing episodes in the
@@ -147,7 +209,7 @@ version 2 single-message output remains replayable, while version 2 paired outpu
 without re-inference. This does not backfill previously completed paired extractions. Matching
 current draft binaries must be deployed together; older binaries do not enforce the new fields.
 
-## Entity and core-block source lineage (unpublished 0.2.0)
+## Entity and core-block source lineage (unpublished 0.2.1)
 
 `MemoryEntity.SourceEpisodeIds` and `MemoryBlock.SourceEpisodeIds` identify contributing
 episodes in the record's exact partition. Both enrichment producers attach the captured
@@ -170,7 +232,7 @@ source-dependent candidates. Raw `ExportAsync` remains an administrative API; us
 `MemoryReadProjection.Create` after namespace authorization for content-level filtering.
 
 The JSON fields are additive and need no schema migration beyond the existing canonical
-partition migration. Deploy matching current 0.2.0 packages together: older store/server
+partition migration. Deploy matching current 0.3.0 packages together: older store/server
 binaries do not enforce these links. This draft version has not been published.
 
 Dependency lists are accumulated lineage; the revision snapshots described above preserve
@@ -231,20 +293,20 @@ package = await memory.ApplyKnowledgeTransferAsync(
     new(package.Id, managerAccess));
 ```
 
-The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` 0.2.0 targets .NET 10 and pins `CSweet.Agent.SDK` 3.30.0, including when sibling project references are disabled. All six memory packages are version 0.2.0. All packages are licensed under Apache-2.0.
+The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` 0.3.0 targets .NET 10 and pins `CSweet.Agent.SDK` 3.30.0, including when sibling project references are disabled. All six memory packages are version 0.3.0. All packages are licensed under Apache-2.0.
 
 ## Creating NuGet packages
 
-Run the batch file from the repository root to restore published dependencies, run the test suite, and create all six packages in a versioned directory such as `artifacts\packages\0.2.0`:
+Run the batch file from the repository root to restore published dependencies, run the test suite, and create all six packages in a versioned directory such as `artifacts\packages\0.3.0`:
 
 ```bat
 Create-NuGetPackages.bat
 ```
 
-Pass a version and optional output root to override the repository defaults. The version directory is appended automatically, so this example writes to `C:\packages\csweet-memory\0.2.0`:
+Pass a version and optional output root to override the repository defaults. The version directory is appended automatically, so this example writes to `C:\packages\csweet-memory\0.3.0`:
 
 ```bat
-Create-NuGetPackages.bat 0.2.0 C:\packages\csweet-memory
+Create-NuGetPackages.bat 0.3.0 C:\packages\csweet-memory
 ```
 
 ## Provenance and classification (0.2.0)

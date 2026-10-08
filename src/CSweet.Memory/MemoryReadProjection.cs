@@ -36,30 +36,42 @@ public static class MemoryReadProjection
     {
         var episodes = projection.Episodes.ToDictionary(x => x.Id);
         var entities = projection.Entities.ToDictionary(x => x.Id);
+        IReadOnlyList<Guid> Closure(IEnumerable<Guid> initial)
+        {
+            var ids = new HashSet<Guid>(); var pending = new Queue<Guid>(initial);
+            while (pending.TryDequeue(out var id))
+            {
+                if (!ids.Add(id)) continue;
+                if (ids.Count > MemoryTransferEvidence.MaximumRecords || !episodes.TryGetValue(id, out var source))
+                    throw new InvalidOperationException("memory_transfer_source_unavailable");
+                foreach (var reference in source.CorrectionEvidence?.Sources ?? []) pending.Enqueue(reference.EpisodeId);
+            }
+            return ids.Order().ToArray();
+        }
         foreach (var episode in projection.Episodes)
             yield return new(episode.Id, partition, MemoryLayer.Episodic, MemoryClaimKind.Observation, episode.Content,
                 episode.Sensitivity, episode.Source.Type.Equals("application", StringComparison.OrdinalIgnoreCase)
                     ? MemoryTrustTier.Authoritative : episode.Source.Type.Equals("user", StringComparison.OrdinalIgnoreCase)
-                    ? MemoryTrustTier.UnconfirmedUser : MemoryTrustTier.External, [episode.Id], $"memory:{episode.Id:N}");
+                    ? MemoryTrustTier.UnconfirmedUser : MemoryTrustTier.External, Closure([episode.Id]), $"memory:{episode.Id:N}");
         foreach (var claim in projection.Claims)
             yield return new(claim.Id, partition, MemoryLayer.Semantic, claim.Kind,
                 $"{entities[claim.SubjectEntityId].CanonicalName} {claim.Predicate} {claim.Value ?? (claim.ObjectEntityId is { } objectId ? entities[objectId].CanonicalName : string.Empty)}",
-                claim.Sensitivity, claim.Trust, new[] { claim.EpisodeId }.Concat(claim.SourceEpisodeIds).Concat(entities[claim.SubjectEntityId].SourceEpisodeIds)
-                    .Concat(claim.ObjectEntityId is { } objectId2 ? entities[objectId2].SourceEpisodeIds : []).Distinct().ToArray(), $"memory:{claim.Id:N}");
+                claim.Sensitivity, claim.Trust, Closure(new[] { claim.EpisodeId }.Concat(claim.SourceEpisodeIds).Concat(entities[claim.SubjectEntityId].SourceEpisodeIds)
+                    .Concat(claim.ObjectEntityId is { } objectId2 ? entities[objectId2].SourceEpisodeIds : [])), $"memory:{claim.Id:N}");
         foreach (var edge in projection.Edges)
             yield return new(edge.Id, partition, MemoryLayer.Semantic, MemoryClaimKind.Fact,
                 $"{entities[edge.FromEntityId].CanonicalName} {edge.Relationship} {entities[edge.ToEntityId].CanonicalName}",
                 MemoryProvenance.Maximum(edge.SourceEpisodeIds.Select(id => episodes[id].Sensitivity).Append(episodes[edge.EpisodeId].Sensitivity)
                     .Append(entities[edge.FromEntityId].Sensitivity).Append(entities[edge.ToEntityId].Sensitivity).ToArray()),
-                edge.Trust, new[] { edge.EpisodeId }.Concat(edge.SourceEpisodeIds).Concat(entities[edge.FromEntityId].SourceEpisodeIds)
-                    .Concat(entities[edge.ToEntityId].SourceEpisodeIds).Distinct().ToArray(), $"memory:{edge.Id:N}");
+                edge.Trust, Closure(new[] { edge.EpisodeId }.Concat(edge.SourceEpisodeIds).Concat(entities[edge.FromEntityId].SourceEpisodeIds)
+                    .Concat(entities[edge.ToEntityId].SourceEpisodeIds)), $"memory:{edge.Id:N}");
         foreach (var block in projection.Blocks)
             yield return new(block.Id, partition, MemoryLayer.Core, MemoryClaimKind.Observation, block.Content,
-                block.Sensitivity, block.Trust, block.SourceEpisodeIds, $"memory:{block.Id:N}");
+                block.Sensitivity, block.Trust, Closure(block.SourceEpisodeIds), $"memory:{block.Id:N}");
         foreach (var procedure in projection.Procedures)
             yield return new(procedure.Id, partition, MemoryLayer.Procedural, MemoryClaimKind.Handoff, $"{procedure.Name}: {procedure.Procedure}",
                 MemoryProvenance.Maximum(procedure.SourceEpisodeIds.Select(id => episodes[id].Sensitivity).Append(episodes[procedure.EpisodeId].Sensitivity).ToArray()),
-                procedure.Trust, new[] { procedure.EpisodeId }.Concat(procedure.SourceEpisodeIds).Distinct().ToArray(), $"memory:{procedure.Id:N}");
+                procedure.Trust, Closure(new[] { procedure.EpisodeId }.Concat(procedure.SourceEpisodeIds)), $"memory:{procedure.Id:N}");
     }
 
     private static bool Current(DateTimeOffset from, DateTimeOffset? to, DateTimeOffset asOf) => from <= asOf && (to is null || to > asOf);

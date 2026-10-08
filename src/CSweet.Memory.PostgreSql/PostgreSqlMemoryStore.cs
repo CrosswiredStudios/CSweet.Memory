@@ -4,7 +4,7 @@ using NpgsqlTypes;
 
 namespace CSweet.Memory;
 
-public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTransferStore, IMemorySourceReader, IMemoryPartitionMigration, IMemoryRevisionReader, IMemoryTransferEvidenceStore
+public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTransferStore, IMemorySourceReader, IMemoryPartitionMigration, IMemoryRevisionReader, IMemoryTransferEvidenceStore, IMemoryCorrectionEvidenceStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly NpgsqlDataSource? _dataSource;
@@ -267,7 +267,7 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
         if (Included(request, MemoryLayer.Episodic))
         {
             var sql = $"""
-                SELECT payload::text,ts_rank_cd(search_vector,websearch_to_tsquery('simple',@query)) score FROM csweet_memory_episodes
+                SELECT payload::text,ts_rank_cd(search_vector,websearch_to_tsquery('simple',@query),2) score FROM csweet_memory_episodes
                 WHERE partition_key=@partition AND search_vector @@ websearch_to_tsquery('simple',@query)
                     AND COALESCE(payload->>'isSuppressed','false')='false' AND {ValidAt("payload", "occurredAt", "expiresAt")}
                 ORDER BY score DESC,id LIMIT @limit

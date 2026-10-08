@@ -97,7 +97,13 @@ public sealed class MemoryEngine : IMemoryEngine
             var found = await _store.SearchAsync(new MemorySearchRequest(
                 memoryNamespace.Partition, memoryNamespace.Scope, request.Query, _options.RetrievalLimit,
                 request.AsOf, request.Layers, embedding, IncludePending: _options.IncludePendingClaims), cancellationToken);
-            candidates.AddRange(found);
+            foreach (var candidate in found)
+            {
+                var allowed = true;
+                foreach (var partition in candidate.RequiredSharedPartitions ?? [])
+                    if (!await _authorizer.CanReadAsync(partition, MemoryScope.Custom, request.Access, cancellationToken)) { allowed = false; break; }
+                if (allowed) candidates.Add(candidate);
+            }
             foreach (var candidate in found) candidatePartitions.TryAdd(candidate.Id, memoryNamespace.Partition);
         }
         var ranked = ReciprocalRankFusion.Rank(candidates);
@@ -149,13 +155,35 @@ public sealed class MemoryEngine : IMemoryEngine
     {
         var claim = await _store.GetClaimAsync(claimId, cancellationToken) ?? throw new KeyNotFoundException($"Memory claim '{claimId}' was not found.");
         if (!await _authorizer.CanWriteAsync(claim.Partition, InferScope(claim.Partition), access, cancellationToken)) throw new UnauthorizedAccessException();
+        if (_store is IMemorySourceReader reader)
+        {
+            var ids = claim.SourceEpisodeIds.Prepend(claim.EpisodeId).ToHashSet();
+            foreach (var id in new[] { (Guid?)claim.SubjectEntityId, claim.ObjectEntityId }.OfType<Guid>().Distinct())
+                if (await reader.GetEntityAsync(claim.Partition, id, cancellationToken) is { } entity)
+                    ids.UnionWith(entity.SourceEpisodeIds);
+            MemoryProvenance.ValidateSourceEpisodes(ids.ToArray());
+            foreach (var id in ids)
+            {
+                var source = await reader.GetEpisodeAsync(claim.Partition, id, cancellationToken);
+                if (source is null) continue;
+                if ((source.TransferEvidence is not null || source.CorrectionEvidence is not null || source.SourceFingerprint?.StartsWith("sha256-v3:", StringComparison.Ordinal) == true) &&
+                    !MemorySourceIntegrity.IsVerified(source)) throw new UnauthorizedAccessException();
+                foreach (var shared in MemorySharedAudiences.FromSources([source]))
+                    if (!await _authorizer.CanReadAsync(shared, MemoryScope.Custom, access, cancellationToken)) throw new UnauthorizedAccessException();
+            }
+        }
         await _store.SetClaimConfirmationAsync(claimId, confirmed ? MemoryConfirmationState.Confirmed : MemoryConfirmationState.Rejected, cancellationToken);
     }
 
     public async Task<MemoryExport> ExportAsync(MemoryPartition partition, MemoryAccessContext? access = null, CancellationToken cancellationToken = default)
     {
         if (!await _authorizer.CanReadAsync(partition, InferScope(partition), access, cancellationToken)) throw new UnauthorizedAccessException();
-        return await _store.ExportAsync(partition, cancellationToken);
+        var export = await _store.ExportAsync(partition, cancellationToken);
+        var required = MemorySharedAudiences.FromSources(export.Episodes);
+        var allowed = new HashSet<MemoryPartition>();
+        foreach (var shared in required)
+            if (await _authorizer.CanReadAsync(shared, MemoryScope.Custom, access, cancellationToken)) allowed.Add(shared);
+        return MemoryAudienceProjection.Create(export, allowed.Contains);
     }
 
     public async Task DeleteAsync(MemoryPartition partition, MemoryAccessContext? access = null, CancellationToken cancellationToken = default)
@@ -185,7 +213,7 @@ public sealed class MemoryEngine : IMemoryEngine
             if (sourceNamespace.Partition.TenantId != request.Access.Principal.TenantId ||
                 !await _authorizer.CanReadAsync(sourceNamespace.Partition, sourceNamespace.Scope, request.Access, cancellationToken))
                 throw new UnauthorizedAccessException("The caller cannot offload one or more source namespaces.");
-            items.AddRange(ToTransferItems(await _store.ExportAsync(sourceNamespace.Partition, cancellationToken), sourceNamespace.Partition));
+            items.AddRange(ToTransferItems(await ExportAsync(sourceNamespace.Partition, request.Access, cancellationToken), sourceNamespace.Partition));
         }
 
         var budget = Math.Max(1, request.TokenBudget);
@@ -226,6 +254,8 @@ public sealed class MemoryEngine : IMemoryEngine
             foreach (var source in package.SourceNamespaces)
                 if (!await _authorizer.CanReadAsync(source.Partition, source.Scope, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
             package = package with { ApprovedEvidence = await EvidenceStore.CaptureTransferEvidenceAsync(package, cancellationToken) };
+            foreach (var shared in package.ApprovedEvidence.RequiredSharedPartitions ?? [])
+                if (!await _authorizer.CanReadAsync(shared, MemoryScope.Custom, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
         }
         await TransferStore.WriteKnowledgeTransferAsync(package, cancellationToken);
         return package;
@@ -237,6 +267,8 @@ public sealed class MemoryEngine : IMemoryEngine
         if (package.Status != KnowledgeTransferStatus.Approved) throw new InvalidOperationException("Knowledge transfer must be approved before it is applied.");
         if (!await _authorizer.CanWriteAsync(package.TargetNamespace.Partition, package.TargetNamespace.Scope, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
         if (package.ApprovedEvidence is null) throw new InvalidOperationException("memory_transfer_review_required");
+        foreach (var shared in package.ApprovedEvidence.RequiredSharedPartitions ?? [])
+            if (!await _authorizer.CanReadAsync(shared, MemoryScope.Custom, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
         foreach (var source in package.SourceNamespaces)
             if (!await _authorizer.CanReadAsync(source.Partition, source.Scope, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
         var currentEvidence = await EvidenceStore.CaptureTransferEvidenceAsync(package, cancellationToken);

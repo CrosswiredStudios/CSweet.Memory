@@ -114,6 +114,8 @@ public sealed record MemoryEpisode(
     /// <summary>Current lifecycle policy; suppression also applies to historical valid-time reads.</summary>
     public bool IsSuppressed { get; init; }
     public MemoryTransferEvidence? TransferEvidence { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public MemoryCorrectionEvidence? CorrectionEvidence { get; init; }
     [System.Text.Json.Serialization.JsonIgnore]
     internal bool TransferEvidenceVerified { get; init; }
 }
@@ -242,7 +244,12 @@ public sealed record MemoryCandidate(
     DateTimeOffset? ValidFrom,
     DateTimeOffset? ValidTo,
     IReadOnlyList<Guid> EpisodeIds,
-    string RetrievalChannel);
+    string RetrievalChannel)
+{
+    /// <summary>Current membership must be checked before this candidate is supplied.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<MemoryPartition>? RequiredSharedPartitions { get; init; }
+}
 
 public sealed record MemoryContextItem(
     Guid Id,

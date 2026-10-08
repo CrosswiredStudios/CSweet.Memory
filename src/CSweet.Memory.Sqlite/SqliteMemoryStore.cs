@@ -4,7 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace CSweet.Memory;
 
-public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransferStore, IMemorySourceReader, IMemoryPartitionMigration, IMemoryRevisionReader, IMemoryTransferEvidenceStore
+public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransferStore, IMemorySourceReader, IMemoryPartitionMigration, IMemoryRevisionReader, IMemoryTransferEvidenceStore, IMemoryCorrectionEvidenceStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string _connectionString;
@@ -41,9 +41,40 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
             await using var command = connection.CreateCommand();
             command.CommandText = Schema + IndexedSearchMigration;
             await command.ExecuteNonQueryAsync(cancellationToken);
+            await UpgradeEntityAliasIndexAsync(connection, cancellationToken);
             _schemaInitialized = true;
         }
         finally { _initializeLock.Release(); }
+    }
+
+    private static async Task UpgradeEntityAliasIndexAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        // Serialize the marker check, trigger replacement and populated backfill with writers.
+        using var transaction = connection.BeginTransaction(deferred: false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT 1 FROM memory_schema_migrations WHERE id='decoded-entity-aliases-v2'";
+        if (await command.ExecuteScalarAsync(cancellationToken) is null)
+        {
+            const string content = "canonical_name || ' ' || coalesce((SELECT group_concat(value,' ') FROM json_each(payload,'$.aliases') WHERE type='text'),'')";
+            var inserted = content.Replace("canonical_name", "new.canonical_name").Replace("payload", "new.payload");
+            command.CommandText = $"""
+                DROP TRIGGER IF EXISTS memory_entities_fts_insert;
+                DROP TRIGGER IF EXISTS memory_entities_fts_update;
+                CREATE TRIGGER memory_entities_fts_insert AFTER INSERT ON memory_entities BEGIN
+                    INSERT INTO memory_entities_fts(id,content) VALUES(new.id,{inserted});
+                END;
+                CREATE TRIGGER memory_entities_fts_update AFTER UPDATE ON memory_entities BEGIN
+                    DELETE FROM memory_entities_fts WHERE id=old.id;
+                    INSERT INTO memory_entities_fts(id,content) VALUES(new.id,{inserted});
+                END;
+                DELETE FROM memory_entities_fts;
+                INSERT INTO memory_entities_fts(id,content) SELECT id,{content} FROM memory_entities;
+                INSERT INTO memory_schema_migrations(id) VALUES('decoded-entity-aliases-v2');
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task<MemoryWriteResult> AppendEpisodeAsync(MemoryEpisode episode, CancellationToken cancellationToken = default)

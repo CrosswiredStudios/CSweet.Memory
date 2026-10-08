@@ -30,6 +30,12 @@ public static class MemorySourceIntegrity
             Metadata = episode.Metadata?.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => new { x.Key, x.Value }).ToArray(),
             References = episode.OperationalReferences?.Select(x => new { x.Type, x.Id, x.Version }).ToArray()
         });
+        if (episode.CorrectionEvidence is not null)
+        {
+            if (episode.TransferEvidence is not null) throw new ArgumentException("memory_evidence_ambiguous");
+            return "sha256-v3:" + Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
+                { EvidenceV1 = Convert.ToHexString(SHA256.HashData(payload)), episode.CorrectionEvidence }))).ToLowerInvariant();
+        }
         if (episode.TransferEvidence is not null)
             return "sha256-v2:" + Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
                 { EvidenceV1 = Convert.ToHexString(SHA256.HashData(payload)), episode.TransferEvidence }))).ToLowerInvariant();
