@@ -7,7 +7,12 @@ namespace CSweet.Memory;
 /// <summary>Evidence integrity, not source authority or authorization. Policy/retention fields remain independently enforced.</summary>
 public static class MemorySourceIntegrity
 {
-    public static MemoryEpisode Seal(MemoryEpisode episode) => episode with { SourceFingerprint = Fingerprint(episode) };
+    public static MemoryEpisode Seal(MemoryEpisode episode) => episode with
+    {
+        SourceFingerprint = Fingerprint(episode),
+        // Sealing changes evidence; derived validation must be established again.
+        VerifiedEvidenceFingerprint = null, RetainedEvidenceFingerprint = null
+    };
 
     public static bool IsVerified(MemoryEpisode episode)
     {

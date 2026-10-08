@@ -1,8 +1,8 @@
 # CSweet.Memory
 
-## Shared-source transfers (unpublished 0.3.0)
+## Shared-source transfers (0.3.1)
 
-All six packages use **0.3.0**. Canonical `EmployeeMemoryNamespaces.Team` and `Role`
+All six packages use **0.3.1**. Canonical `EmployeeMemoryNamespaces.Team` and `Role`
 namespaces may be transfer sources; recipients remain employee or own-relationship
 namespaces. `MemoryTransferEvidence.RequiredSharedPartitions` is verified against the
 source snapshot and inherited through nested copies, including notes-only handoffs.
@@ -46,7 +46,7 @@ replacement-target replay and complete platform lifecycle integration are being 
 
 ## Retrieval maintenance (unpublished 0.2.1)
 
-The retrieval maintenance introduced in 0.2.1 remains included in 0.3.0. `SqliteMemoryStore.UpgradeEntityAliasIndexAsync` applies
+The retrieval maintenance introduced in 0.2.1 remains included in 0.3.1. `SqliteMemoryStore.UpgradeEntityAliasIndexAsync` applies
 `decoded-entity-aliases-v2`: it decodes text aliases with `json_each`, replaces the entity index
 triggers and rebuilds populated FTS rows under one writer transaction. Existing entity IDs,
 payloads, source links and revision history remain intact; failure rolls back the upgrade and
@@ -60,7 +60,7 @@ limit. This ranking change does not establish answer correctness for an ambiguou
 
 `LexicalRetrievalRegressionTests` covers fresh Unicode aliases, updates, identifier density,
 future/expired distractors, populated upgrade, injected rollback, concurrent initialization,
-legacy writes and restart. Use matching 0.3.0 packages in consumers; publication remains separate.
+legacy writes and restart. Use matching 0.3.1 packages in consumers; publication remains separate.
 
 ## Core review state (unpublished 0.2.1)
 
@@ -232,7 +232,7 @@ source-dependent candidates. Raw `ExportAsync` remains an administrative API; us
 `MemoryReadProjection.Create` after namespace authorization for content-level filtering.
 
 The JSON fields are additive and need no schema migration beyond the existing canonical
-partition migration. Deploy matching current 0.3.0 packages together: older store/server
+partition migration. Deploy matching current 0.3.1 packages together: older store/server
 binaries do not enforce these links. This draft version has not been published.
 
 Dependency lists are accumulated lineage; the revision snapshots described above preserve
@@ -293,20 +293,20 @@ package = await memory.ApplyKnowledgeTransferAsync(
     new(package.Id, managerAccess));
 ```
 
-The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` 0.3.0 targets .NET 10 and pins `CSweet.Agent.SDK` 3.30.0, including when sibling project references are disabled. All six memory packages are version 0.3.0. All packages are licensed under Apache-2.0.
+The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` 0.3.1 targets .NET 10 and pins `CSweet.Agent.SDK` 3.30.0, including when sibling project references are disabled. All six memory packages are version 0.3.1. All packages are licensed under Apache-2.0.
 
 ## Creating NuGet packages
 
-Run the batch file from the repository root to restore published dependencies, run the test suite, and create all six packages in a versioned directory such as `artifacts\packages\0.3.0`:
+Run the batch file from the repository root to restore published dependencies, run the test suite, and create all six packages in a versioned directory such as `artifacts\packages\0.3.1`:
 
 ```bat
 Create-NuGetPackages.bat
 ```
 
-Pass a version and optional output root to override the repository defaults. The version directory is appended automatically, so this example writes to `C:\packages\csweet-memory\0.3.0`:
+Pass a version and optional output root to override the repository defaults. The version directory is appended automatically, so this example writes to `C:\packages\csweet-memory\0.3.1`:
 
 ```bat
-Create-NuGetPackages.bat 0.3.0 C:\packages\csweet-memory
+Create-NuGetPackages.bat 0.3.1 C:\packages\csweet-memory
 ```
 
 ## Provenance and classification (0.2.0)

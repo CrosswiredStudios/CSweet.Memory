@@ -116,8 +116,19 @@ public sealed record MemoryEpisode(
     public MemoryTransferEvidence? TransferEvidence { get; init; }
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public MemoryCorrectionEvidence? CorrectionEvidence { get; init; }
+    // Derived, never serialized. Each result is bound to the exact fingerprint it verified, so any
+    // evidence mutation or reseal invalidates it until a store resolves the episode again.
     [System.Text.Json.Serialization.JsonIgnore]
-    internal bool TransferEvidenceVerified { get; init; }
+    internal string? VerifiedEvidenceFingerprint { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal string? RetainedEvidenceFingerprint { get; init; }
+    /// <summary>Current recall eligibility of transfer/correction ancestry, as resolved by a store.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal bool TransferEvidenceVerified => VerifiedEvidenceFingerprint is { } verified && verified == SourceFingerprint;
+    /// <summary>Retained certificate integrity, independent of suppression, expiry or revocation.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal bool RetainedEvidenceVerified => TransferEvidenceVerified ||
+        RetainedEvidenceFingerprint is { } retained && retained == SourceFingerprint;
 }
 
 public sealed record MemoryEntity(
