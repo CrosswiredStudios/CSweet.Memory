@@ -68,8 +68,11 @@ public sealed class MemoryEnrichmentWorker : BackgroundService, IMemoryEnrichmen
             var entity = existing ?? new MemoryEntity(
                 Guid.NewGuid(), episode.Partition, type, extracted.Name,
                 extracted.Aliases ?? [], extracted.ApplicationKey, isProtected,
-                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-            await _store.UpsertEntityAsync(entity, cancellationToken);
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow) { Sensitivity = episode.Sensitivity };
+            entity = entity with { Sensitivity = MemoryProvenance.Maximum(entity.Sensitivity, episode.Sensitivity),
+                SourceEpisodeIds = entity.SourceEpisodeIds.Append(episode.Id).Distinct().ToArray() };
+            var written = await _store.UpsertEntityAsync(entity, cancellationToken);
+            entity = entity with { Id = written.Id };
             entities[extracted.Name] = entity;
         }
 
@@ -77,13 +80,15 @@ public sealed class MemoryEnrichmentWorker : BackgroundService, IMemoryEnrichmen
         {
             if (!entities.TryGetValue(extracted.SubjectName, out var subject)) continue;
             entities.TryGetValue(extracted.ObjectName ?? string.Empty, out var objectEntity);
-            var confirmation = extracted.Sensitivity >= MemorySensitivity.Confidential
+            var sensitivity = MemoryProvenance.Maximum(extracted.Sensitivity, episode.Sensitivity,
+                subject.Sensitivity, objectEntity?.Sensitivity ?? MemorySensitivity.Public);
+            var confirmation = sensitivity >= MemorySensitivity.Confidential
                 ? MemoryConfirmationState.Pending
                 : MemoryConfirmationState.NotRequired;
             var claim = new MemoryClaim(
                 Guid.NewGuid(), episode.Partition, episode.Id, subject.Id, extracted.Predicate,
                 objectEntity?.Id, extracted.Value, MemoryTrustTier.AgentInference, confirmation,
-                extracted.Sensitivity, Math.Clamp(extracted.Confidence, 0, 1), Math.Clamp(extracted.Importance, 0, 1),
+                sensitivity, Math.Clamp(extracted.Confidence, 0, 1), Math.Clamp(extracted.Importance, 0, 1),
                 episode.OccurredAt, null, DateTimeOffset.UtcNow, ExtractorVersion: _enricher!.Version, Kind: extracted.Kind);
             var conflicting = (await _store.ListClaimsAsync(episode.Partition, cancellationToken))
                 .FirstOrDefault(existing => existing.SubjectEntityId == subject.Id &&

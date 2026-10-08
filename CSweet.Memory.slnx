@@ -6,4 +6,5 @@
   <Project Path="src/CSweet.Memory.PostgreSql/CSweet.Memory.PostgreSql.csproj" />
   <Project Path="src/CSweet.Memory.Broker/CSweet.Memory.Broker.csproj" />
   <Project Path="tests/CSweet.Memory.Tests/CSweet.Memory.Tests.csproj" />
+  <Project Path="tools/CSweet.Memory.Migrate/CSweet.Memory.Migrate.csproj" />
 </Solution>

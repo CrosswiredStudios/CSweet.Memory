@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
@@ -61,7 +62,8 @@ public sealed class MemoryEngine : IMemoryEngine
         var episode = new MemoryEpisode(
             Guid.NewGuid(), request.Partition, request.Scope, request.Content, request.ContentType,
             request.Source, ComputeChecksum(request.Content), request.OccurredAt ?? now, now,
-            request.IdempotencyKey, request.ExpiresAt, request.LegalHold, request.Metadata, request.Sensitivity, request.OperationalReferences);
+            request.IdempotencyKey, request.ExpiresAt, request.LegalHold, request.Metadata, request.Sensitivity, request.OperationalReferences) { TransferEvidence = request.TransferEvidence };
+        episode = MemorySourceIntegrity.Seal(episode);
         var result = await _store.AppendEpisodeAsync(episode, cancellationToken);
         episode = episode with { Id = result.Id };
         if (result.Created && _enrichmentQueue is not null)
@@ -89,7 +91,7 @@ public sealed class MemoryEngine : IMemoryEngine
         var namespaces = await _namespaceResolver.ResolveReadableNamespacesAsync(request.Partition, request.Scope, request.Access, cancellationToken);
         var candidates = new List<MemoryCandidate>();
         var candidatePartitions = new Dictionary<Guid, MemoryPartition>();
-        foreach (var memoryNamespace in namespaces.DistinctBy(item => (item.Partition.Key, item.Scope)))
+        foreach (var memoryNamespace in namespaces.DistinctBy(item => (item.Partition.StorageKey, item.Scope)))
         {
             if (!await _authorizer.CanReadAsync(memoryNamespace.Partition, memoryNamespace.Scope, request.Access, cancellationToken)) continue;
             var found = await _store.SearchAsync(new MemorySearchRequest(
@@ -168,7 +170,9 @@ public sealed class MemoryEngine : IMemoryEngine
         ArgumentException.ThrowIfNullOrWhiteSpace(request.TargetEmployeeId);
         if (request.SourceEmployeeId == request.TargetEmployeeId) throw new ArgumentException("Knowledge transfer requires different source and target employees.");
         if (request.SourceNamespaces.Count == 0) throw new ArgumentException("At least one source namespace is required.");
-        if (request.TargetNamespace.Audience != MemoryAudienceType.Employee || !string.Equals(request.TargetNamespace.AudienceId, request.TargetEmployeeId, StringComparison.Ordinal))
+        if (!((request.TargetNamespace.Audience == MemoryAudienceType.Employee && request.TargetNamespace.AudienceId == request.TargetEmployeeId) ||
+            (request.TargetNamespace.Audience == MemoryAudienceType.UserRelationship && request.TargetNamespace.Partition.AgentId == request.TargetEmployeeId &&
+                request.TargetNamespace.Partition.UserId == request.TargetNamespace.AudienceId)))
             throw new ArgumentException("The target namespace must be the replacement employee's namespace.");
         if (request.DebriefSensitivity > request.MaximumSensitivity)
             throw new InvalidOperationException("The debrief exceeds the maximum sensitivity permitted for this transfer.");
@@ -176,7 +180,7 @@ public sealed class MemoryEngine : IMemoryEngine
         if (!await _authorizer.CanWriteAsync(request.TargetNamespace.Partition, request.TargetNamespace.Scope, request.Access, cancellationToken)) throw new UnauthorizedAccessException("The caller cannot create knowledge for the target employee.");
 
         var items = new List<KnowledgeTransferItem>();
-        foreach (var sourceNamespace in request.SourceNamespaces.DistinctBy(item => (item.Partition.Key, item.Scope)))
+        foreach (var sourceNamespace in request.SourceNamespaces.DistinctBy(item => (item.Partition.StorageKey, item.Scope)))
         {
             if (sourceNamespace.Partition.TenantId != request.Access.Principal.TenantId ||
                 !await _authorizer.CanReadAsync(sourceNamespace.Partition, sourceNamespace.Scope, request.Access, cancellationToken))
@@ -217,6 +221,12 @@ public sealed class MemoryEngine : IMemoryEngine
             ApprovedAt = DateTimeOffset.UtcNow,
             ApprovalNotes = request.Notes
         };
+        if (request.Approved)
+        {
+            foreach (var source in package.SourceNamespaces)
+                if (!await _authorizer.CanReadAsync(source.Partition, source.Scope, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
+            package = package with { ApprovedEvidence = await EvidenceStore.CaptureTransferEvidenceAsync(package, cancellationToken) };
+        }
         await TransferStore.WriteKnowledgeTransferAsync(package, cancellationToken);
         return package;
     }
@@ -226,16 +236,24 @@ public sealed class MemoryEngine : IMemoryEngine
         var package = await TransferStore.GetKnowledgeTransferAsync(request.PackageId, cancellationToken) ?? throw new KeyNotFoundException();
         if (package.Status != KnowledgeTransferStatus.Approved) throw new InvalidOperationException("Knowledge transfer must be approved before it is applied.");
         if (!await _authorizer.CanWriteAsync(package.TargetNamespace.Partition, package.TargetNamespace.Scope, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
+        if (package.ApprovedEvidence is null) throw new InvalidOperationException("memory_transfer_review_required");
+        foreach (var source in package.SourceNamespaces)
+            if (!await _authorizer.CanReadAsync(source.Partition, source.Scope, request.Access, cancellationToken)) throw new UnauthorizedAccessException();
+        var currentEvidence = await EvidenceStore.CaptureTransferEvidenceAsync(package, cancellationToken);
+        if (JsonSerializer.Serialize(currentEvidence) != JsonSerializer.Serialize(package.ApprovedEvidence))
+            throw new InvalidOperationException("memory_transfer_evidence_changed");
         var episode = await IngestAsync(new MemoryIngestRequest(
-            package.TargetNamespace.Partition, package.TargetNamespace.Scope, RenderTransfer(package),
+            package.TargetNamespace.Partition, package.TargetNamespace.Scope, MemoryTransferEvidence.RenderContent(package),
             new MemorySource("knowledge-transfer", package.Id.ToString("D"), package.SourceEmployeeId),
-            IdempotencyKey: $"knowledge-transfer:{package.Id:D}",
+            IdempotencyKey: $"knowledge-transfer:{package.Id:D}", LegalHold: package.ApprovedEvidence.LegalHold,
             Metadata: new Dictionary<string, string>
             {
                 ["sourceEmployeeId"] = package.SourceEmployeeId,
                 ["targetEmployeeId"] = package.TargetEmployeeId,
                 ["approvedByEmployeeId"] = package.ApprovedByEmployeeId ?? string.Empty
-            }, Access: request.Access), cancellationToken);
+            }, Access: request.Access,
+            Sensitivity: MemoryProvenance.Maximum(package.Items.Select(x => x.Sensitivity)
+                .Append(package.DebriefSensitivity).ToArray())) { TransferEvidence = package.ApprovedEvidence }, cancellationToken);
         package = package with { Status = KnowledgeTransferStatus.Applied, AppliedAt = DateTimeOffset.UtcNow, AppliedEpisodeId = episode.Id };
         await TransferStore.WriteKnowledgeTransferAsync(package, cancellationToken);
         return package;
@@ -249,40 +267,15 @@ public sealed class MemoryEngine : IMemoryEngine
             request.Outcome, DateTimeOffset.UtcNow), cancellationToken);
     }
 
+    private IMemoryTransferEvidenceStore EvidenceStore => _store as IMemoryTransferEvidenceStore ??
+        throw new NotSupportedException("The store cannot validate transfer evidence.");
+
     private IKnowledgeTransferStore TransferStore => _store as IKnowledgeTransferStore ??
         throw new NotSupportedException($"{_store.GetType().Name} does not support durable knowledge transfer.");
 
-    private static IEnumerable<KnowledgeTransferItem> ToTransferItems(MemoryExport export, MemoryPartition partition)
-    {
-        var entities = export.Entities.ToDictionary(entity => entity.Id, entity => entity.CanonicalName);
-        foreach (var episode in export.Episodes)
-            yield return new(episode.Id, partition, MemoryLayer.Episodic, MemoryClaimKind.Observation, episode.Content,
-                episode.Sensitivity, SourceTrust(episode.Source.Type), [episode.Id], $"memory:{episode.Id:N}");
-        foreach (var claim in export.Claims.Where(claim => claim.ValidTo is null && claim.Confirmation != MemoryConfirmationState.Rejected))
-            yield return new(claim.Id, partition, MemoryLayer.Semantic, claim.Kind,
-                $"{entities.GetValueOrDefault(claim.SubjectEntityId, claim.SubjectEntityId.ToString())} {claim.Predicate} {claim.Value ?? (claim.ObjectEntityId is Guid objectId ? entities.GetValueOrDefault(objectId, objectId.ToString()) : string.Empty)}",
-                claim.Sensitivity, claim.Trust, [claim.EpisodeId], $"memory:{claim.Id:N}");
-        foreach (var edge in export.Edges.Where(edge => edge.ValidTo is null))
-            yield return new(edge.Id, partition, MemoryLayer.Semantic, MemoryClaimKind.Fact,
-                $"{entities.GetValueOrDefault(edge.FromEntityId, edge.FromEntityId.ToString())} {edge.Relationship} {entities.GetValueOrDefault(edge.ToEntityId, edge.ToEntityId.ToString())}",
-                MemorySensitivity.Internal, edge.Trust, [edge.EpisodeId], $"memory:{edge.Id:N}");
-        foreach (var block in export.Blocks)
-            yield return new(block.Id, partition, MemoryLayer.Core, MemoryClaimKind.Observation, block.Content,
-                MemorySensitivity.Internal, block.Trust, [], $"memory:{block.Id:N}");
-        foreach (var procedure in export.Procedures.Where(procedure => procedure.ValidTo is null && procedure.Confirmation == MemoryConfirmationState.Confirmed))
-            yield return new(procedure.Id, partition, MemoryLayer.Procedural, MemoryClaimKind.Handoff, $"{procedure.Name}: {procedure.Procedure}",
-                MemorySensitivity.Internal, procedure.Trust, [procedure.EpisodeId], $"memory:{procedure.Id:N}");
-    }
-
-    private static string RenderTransfer(KnowledgeTransferPackage package)
-    {
-        var builder = new StringBuilder();
-        builder.AppendLine($"Knowledge transfer from employee {package.SourceEmployeeId} to employee {package.TargetEmployeeId}.");
-        if (!string.IsNullOrWhiteSpace(package.Debrief)) builder.AppendLine($"Debrief: {package.Debrief}");
-        foreach (var item in package.Items) builder.Append("- [").Append(item.Kind).Append("] ").Append(item.Content).Append(" [").Append(item.Citation).AppendLine("]");
-        return builder.ToString();
-    }
-
+    private static IEnumerable<KnowledgeTransferItem> ToTransferItems(MemoryExport export, MemoryPartition partition) =>
+        MemoryReadProjection.TransferItems(MemoryReadProjection.Create(export, partition,
+            MemorySensitivity.Restricted, DateTimeOffset.UtcNow), partition);
     private static MemoryScope InferScope(MemoryPartition partition) => partition.ConversationId is not null ? MemoryScope.Conversation
         : partition.UserId is not null ? MemoryScope.User : partition.AgentId is not null ? MemoryScope.Agent
         : partition.ApplicationId is not null ? MemoryScope.Application : MemoryScope.Tenant;

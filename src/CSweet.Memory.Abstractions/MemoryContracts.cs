@@ -39,7 +39,10 @@ public sealed record MemoryIngestRequest(
     IReadOnlyDictionary<string, string>? Metadata = null,
     MemoryAccessContext? Access = null,
     MemorySensitivity Sensitivity = MemorySensitivity.Internal,
-    IReadOnlyList<MemoryOperationalReference>? OperationalReferences = null);
+    IReadOnlyList<MemoryOperationalReference>? OperationalReferences = null)
+{
+    public MemoryTransferEvidence? TransferEvidence { get; init; }
+}
 
 public sealed record MemoryRecallRequest(
     MemoryPartition Partition,
