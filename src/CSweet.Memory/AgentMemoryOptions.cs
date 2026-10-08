@@ -124,7 +124,7 @@ public sealed class WorkContextMemoryNamespaceResolver : IMemoryNamespaceResolve
             namespaces.Add(EmployeeMemoryNamespaces.Team(principal.TenantId, teamId!, primaryPartition.ApplicationId));
         if (!string.IsNullOrWhiteSpace(access.WorkContext?.CaseId))
             namespaces.Add(EmployeeMemoryNamespaces.Case(principal.TenantId, access.WorkContext.CaseId, primaryPartition.ApplicationId));
-        return ValueTask.FromResult<IReadOnlyList<MemoryNamespace>>(namespaces.DistinctBy(item => item.Partition.Key).ToList());
+        return ValueTask.FromResult<IReadOnlyList<MemoryNamespace>>(namespaces.DistinctBy(item => item.Partition.StorageKey).ToList());
     }
 
     private static MemoryAudienceType PrimaryAudience(MemoryScope scope) => scope switch

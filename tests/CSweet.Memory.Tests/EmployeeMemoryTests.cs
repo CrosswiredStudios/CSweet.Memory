@@ -74,7 +74,7 @@ public sealed class EmployeeMemoryTests : IAsyncLifetime
         var engine = CreateEngine();
         var transferable = await engine.IngestAsync(new MemoryIngestRequest(
             source.Partition, source.Scope, "Escalation checklist: contact the account owner before finance.",
-            new MemorySource("employee", "debrief-1"), Access: ManagerAccess));
+            new MemorySource("employee", "debrief-1"), Access: ManagerAccess, Sensitivity: MemorySensitivity.Personal));
         await engine.IngestAsync(new MemoryIngestRequest(
             source.Partition, source.Scope, "Restricted executive credential", new MemorySource("employee", "secret-1"),
             Access: ManagerAccess, Sensitivity: MemorySensitivity.Restricted));
@@ -94,6 +94,7 @@ public sealed class EmployeeMemoryTests : IAsyncLifetime
 
         Assert.Equal(KnowledgeTransferStatus.Applied, package.Status);
         Assert.NotNull(package.AppliedEpisodeId);
+        Assert.Equal(MemorySensitivity.Personal, Assert.Single((await _store.ExportAsync(target.Partition)).Episodes).Sensitivity);
         var targetRecall = await engine.RecallAsync(new MemoryRecallRequest(target.Partition, target.Scope, "escalation checklist", Access: ManagerAccess));
         Assert.Single(targetRecall.Items);
         Assert.Contains($"memory:{transferable.Id:N}", targetRecall.Items[0].Content, StringComparison.Ordinal);

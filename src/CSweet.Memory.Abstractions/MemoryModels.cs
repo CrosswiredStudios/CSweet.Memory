@@ -22,6 +22,26 @@ public sealed record MemoryPartition(
     {
         TenantId, ApplicationId, AgentId, UserId, ConversationId, CustomNamespace
     }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+    /// <summary>Versioned storage identity over all six fields. Key remains a legacy display/wire value.</summary>
+    public string StorageKey
+    {
+        get
+        {
+            using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            hash.AppendData("CSweet.Memory.Partition/v2\0"u8);
+            var encoding = new System.Text.UTF8Encoding(false, true);
+            Span<byte> length = stackalloc byte[4];
+            foreach (var component in new[] { TenantId, ApplicationId, AgentId, UserId, ConversationId, CustomNamespace })
+            {
+                var bytes = component is null ? null : encoding.GetBytes(component);
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(length, bytes?.Length ?? -1);
+                hash.AppendData(length);
+                if (bytes is not null) hash.AppendData(bytes);
+            }
+            return "mp2:" + Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+    }
 }
 
 public sealed record MemorySource(string Type, string Id, string? Author = null);
@@ -87,7 +107,16 @@ public sealed record MemoryEpisode(
     bool LegalHold = false,
     IReadOnlyDictionary<string, string>? Metadata = null,
     MemorySensitivity Sensitivity = MemorySensitivity.Internal,
-    IReadOnlyList<MemoryOperationalReference>? OperationalReferences = null);
+    IReadOnlyList<MemoryOperationalReference>? OperationalReferences = null)
+{
+    /// <summary>Server-owned fingerprint of immutable evidence fields. Missing legacy fingerprints require review.</summary>
+    public string? SourceFingerprint { get; init; }
+    /// <summary>Current lifecycle policy; suppression also applies to historical valid-time reads.</summary>
+    public bool IsSuppressed { get; init; }
+    public MemoryTransferEvidence? TransferEvidence { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal bool TransferEvidenceVerified { get; init; }
+}
 
 public sealed record MemoryEntity(
     Guid Id,
@@ -98,7 +127,13 @@ public sealed record MemoryEntity(
     string? ApplicationKey,
     bool IsProtectedType,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    // Legacy entities have no classification. Only a trusted producer may classify them.
+    public MemorySensitivity Sensitivity { get; init; } = MemorySensitivity.Restricted;
+    /// <summary>Contributing episodes in this exact partition. Ordinary updates cannot remove prior contributions.</summary>
+    public IReadOnlyList<Guid> SourceEpisodeIds { get; init; } = [];
+}
 
 public sealed record MemoryClaim(
     Guid Id,
@@ -118,7 +153,11 @@ public sealed record MemoryClaim(
     DateTimeOffset RecordedAt,
     Guid? SupersedesClaimId = null,
     string? ExtractorVersion = null,
-    MemoryClaimKind Kind = MemoryClaimKind.Fact);
+    MemoryClaimKind Kind = MemoryClaimKind.Fact)
+{
+    /// <summary>Additional contributing episodes in this exact partition; EpisodeId remains required.</summary>
+    public IReadOnlyList<Guid> SourceEpisodeIds { get; init; } = [];
+}
 
 public sealed record MemoryEdge(
     Guid Id,
@@ -132,7 +171,11 @@ public sealed record MemoryEdge(
     DateTimeOffset ValidFrom,
     DateTimeOffset? ValidTo,
     bool IsLearned,
-    DateTimeOffset RecordedAt);
+    DateTimeOffset RecordedAt)
+{
+    /// <summary>Additional contributing episodes in this exact partition; EpisodeId remains required.</summary>
+    public IReadOnlyList<Guid> SourceEpisodeIds { get; init; } = [];
+}
 
 public sealed record MemoryBlock(
     Guid Id,
@@ -143,7 +186,14 @@ public sealed record MemoryBlock(
     int MaximumTokens,
     bool IsPinned,
     MemoryTrustTier Trust,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>Explicit human review state. Missing legacy values retain NotRequired; source policy still applies.</summary>
+    public MemoryConfirmationState Confirmation { get; init; } = MemoryConfirmationState.NotRequired;
+    public MemorySensitivity Sensitivity { get; init; } = MemorySensitivity.Restricted;
+    /// <summary>Contributing episodes in this exact partition. Ordinary updates cannot remove prior contributions.</summary>
+    public IReadOnlyList<Guid> SourceEpisodeIds { get; init; } = [];
+}
 
 public sealed record ProceduralMemory(
     Guid Id,
@@ -157,7 +207,11 @@ public sealed record ProceduralMemory(
     MemoryConfirmationState Confirmation,
     DateTimeOffset ValidFrom,
     DateTimeOffset? ValidTo,
-    DateTimeOffset RecordedAt);
+    DateTimeOffset RecordedAt)
+{
+    /// <summary>Additional contributing episodes in this exact partition; EpisodeId remains required.</summary>
+    public IReadOnlyList<Guid> SourceEpisodeIds { get; init; } = [];
+}
 
 public sealed record MemoryUse(
     Guid Id,
@@ -233,4 +287,7 @@ public sealed record KnowledgeTransferPackage(
     DateTimeOffset? ApprovedAt = null,
     DateTimeOffset? AppliedAt = null,
     Guid? AppliedEpisodeId = null,
-    string? ApprovalNotes = null);
+    string? ApprovalNotes = null)
+{
+    public MemoryTransferEvidence? ApprovedEvidence { get; init; }
+}

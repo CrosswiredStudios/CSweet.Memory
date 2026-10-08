@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/CSweet.Memory/CSweet.Memory.csproj" />
     <ProjectReference Include="../../src/CSweet.Memory.Sqlite/CSweet.Memory.Sqlite.csproj" />
+    <ProjectReference Include="../../src/CSweet.Memory.PostgreSql/CSweet.Memory.PostgreSql.csproj" />
     <ProjectReference Include="../../src/CSweet.Memory.MicrosoftAgentFramework/CSweet.Memory.MicrosoftAgentFramework.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="Microsoft.Agents.AI.Abstractions" />
