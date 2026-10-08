@@ -44,9 +44,34 @@ internal sealed partial class MemoryTransferEvidenceStorage(Func<string, DbComma
 
     internal async Task<MemoryEpisode> ResolveAsync(MemoryEpisode episode, CancellationToken token)
     {
-        try { return episode with { TransferEvidenceVerified = await VerifyAsync(episode, new HashSet<Guid>(), 0, token) }; }
+        // Start from no derived state: a caller-supplied copy cannot carry an earlier result forward.
+        episode = episode with { VerifiedEvidenceFingerprint = null, RetainedEvidenceFingerprint = null };
+        try
+        {
+            if (await VerifyAsync(episode, new HashSet<Guid>(), 0, token))
+                return episode with { VerifiedEvidenceFingerprint = episode.SourceFingerprint, RetainedEvidenceFingerprint = episode.SourceFingerprint };
+            return await VerifyRetainedIntegrityAsync(episode, token)
+                ? episode with { RetainedEvidenceFingerprint = episode.SourceFingerprint } : episode;
+        }
         catch (Exception error) when (error is JsonException or ArgumentException or InvalidOperationException or NullReferenceException)
-        { return episode with { TransferEvidenceVerified = false }; }
+        { return episode; }
+    }
+
+    // Retained integrity lets an authorized inspection keep suppressed, expired or revoked copies
+    // visible as evidence. It never grants recall: eligibility still requires TransferEvidenceVerified.
+    private async Task<bool> VerifyRetainedIntegrityAsync(MemoryEpisode episode, CancellationToken token)
+    {
+        if (!MemorySourceIntegrity.IsVerified(episode)) return false;
+        try
+        {
+            if (episode.CorrectionEvidence is not null) return await VerifyCorrectionAsync(episode, [], 0, true, token);
+            if (episode.TransferEvidence is { Records.Count: 0 }) return await VerifyNotesOnlyRetentionAsync(episode, token);
+            if (episode.TransferEvidence is not null) return await VerifyTransferRetentionAsync(episode, [], 0, token);
+            return episode.SourceFingerprint?.StartsWith("sha256-v3:", StringComparison.Ordinal) != true &&
+                !string.Equals(episode.Source.Type, "knowledge-transfer", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception error) when (error is JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException or NullReferenceException)
+        { return false; }
     }
 
     // Retention verification does not establish recall eligibility. Suppressed,

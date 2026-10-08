@@ -1,12 +1,16 @@
 namespace CSweet.Memory;
 
-/// <summary>Removes shared-restricted copies and every contributor-dependent record from an export.</summary>
+/// <summary>
+/// Removes shared-restricted copies, copies whose retained certificate a store did not verify, and every
+/// contributor-dependent record from an export. A self-consistent reseal is not proof of a valid certificate.
+/// </summary>
 public static class MemoryAudienceProjection
 {
     public static MemoryExport Create(MemoryExport export, Func<MemoryPartition, bool> allowed)
     {
         var blocked = export.Episodes.Where(x =>
-            (x.TransferEvidence is not null || x.CorrectionEvidence is not null || x.SourceFingerprint?.StartsWith("sha256-v3:", StringComparison.Ordinal) == true || x.Source?.Type == "knowledge-transfer") && !MemorySourceIntegrity.IsVerified(x) ||
+            (x.TransferEvidence is not null || x.CorrectionEvidence is not null || x.SourceFingerprint?.StartsWith("sha256-v3:", StringComparison.Ordinal) == true || x.Source?.Type == "knowledge-transfer") &&
+                (!MemorySourceIntegrity.IsVerified(x) || !x.RetainedEvidenceVerified) ||
             MemorySharedAudiences.Required(x) is { } required &&
             (required.Count is < 1 or > MemorySharedAudiences.MaximumPartitions ||
              required.Any(p => !MemorySharedAudiences.IsCanonical(p) || !allowed(p)))).Select(x => x.Id).ToHashSet();
