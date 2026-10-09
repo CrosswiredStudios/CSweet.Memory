@@ -1,8 +1,33 @@
 # CSweet.Memory
 
+## Contributor limits (0.4.1)
+
+Core, claim/entity, procedure and graph queries check direct secondary contributors
+before candidate limits. Missing, foreign, suppressed, future or expired sources cannot
+hide eligible evidence. Graph roots, edges and endpoints share these checks; referenced
+claim objects must exist in the same partition. Timestamps use exact valid time, including
+offsets and 100-nanosecond boundaries. Full sealed-transfer lineage, classification and
+current audience authorization still apply after selection.
+
+## Focused core search (introduced in 0.4.0)
+
+Ordinary `IMemoryStore.SearchAsync` queries match core block names/content instead of
+returning every pinned block. Matching, confirmation and direct timestamp filters precede
+the result limit, so unrelated or future/pending rows cannot crowd out a relevant preference.
+SQLite's `indexed-core-search-v1` upgrade atomically backfills FTS5 and installs triggers;
+PostgreSQL adds a generated search vector and GIN index under its serialized migration.
+Legacy writers keep both indexes current without knowing about the new index fields.
+
+`MemorySearchRequest.IncludePinnedCore` explicitly includes eligible pinned context even
+when unrelated to a search query. `MemoryEngine.RecallAsync` opts in for persistent context;
+targeted store/broker searches default to topic matching. Source lineage, sensitivity,
+confirmation, current audience and suppression requirements still apply. This additive
+request API leaves the existing positional constructor intact. Deploy matching 0.4.1
+packages together; package publication remains separate from local verification.
+
 ## Shared-source transfers (0.3.1)
 
-All six packages use **0.3.1**. Canonical `EmployeeMemoryNamespaces.Team` and `Role`
+All six packages use **0.4.1**. Canonical `EmployeeMemoryNamespaces.Team` and `Role`
 namespaces may be transfer sources; recipients remain employee or own-relationship
 namespaces. `MemoryTransferEvidence.RequiredSharedPartitions` is verified against the
 source snapshot and inherited through nested copies, including notes-only handoffs.
@@ -46,7 +71,7 @@ replacement-target replay and complete platform lifecycle integration are being 
 
 ## Retrieval maintenance (unpublished 0.2.1)
 
-The retrieval maintenance introduced in 0.2.1 remains included in 0.3.1. `SqliteMemoryStore.UpgradeEntityAliasIndexAsync` applies
+The retrieval maintenance introduced in 0.2.1 remains included in 0.4.1. `SqliteMemoryStore.UpgradeEntityAliasIndexAsync` applies
 `decoded-entity-aliases-v2`: it decodes text aliases with `json_each`, replaces the entity index
 triggers and rebuilds populated FTS rows under one writer transaction. Existing entity IDs,
 payloads, source links and revision history remain intact; failure rolls back the upgrade and
@@ -60,7 +85,7 @@ limit. This ranking change does not establish answer correctness for an ambiguou
 
 `LexicalRetrievalRegressionTests` covers fresh Unicode aliases, updates, identifier density,
 future/expired distractors, populated upgrade, injected rollback, concurrent initialization,
-legacy writes and restart. Use matching 0.3.1 packages in consumers; publication remains separate.
+legacy writes and restart. Use matching 0.4.1 packages in consumers; publication remains separate.
 
 ## Core review state (unpublished 0.2.1)
 
@@ -232,7 +257,7 @@ source-dependent candidates. Raw `ExportAsync` remains an administrative API; us
 `MemoryReadProjection.Create` after namespace authorization for content-level filtering.
 
 The JSON fields are additive and need no schema migration beyond the existing canonical
-partition migration. Deploy matching current 0.3.1 packages together: older store/server
+partition migration. Deploy matching current 0.4.1 packages together: older store/server
 binaries do not enforce these links. This draft version has not been published.
 
 Dependency lists are accumulated lineage; the revision snapshots described above preserve
@@ -293,20 +318,20 @@ package = await memory.ApplyKnowledgeTransferAsync(
     new(package.Id, managerAccess));
 ```
 
-The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` 0.3.1 targets .NET 10 and pins `CSweet.Agent.SDK` 3.30.0, including when sibling project references are disabled. All six memory packages are version 0.3.1. All packages are licensed under Apache-2.0.
+The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` 0.4.1 targets .NET 10 and pins `CSweet.Agent.SDK` 3.30.0, including when sibling project references are disabled. All six memory packages are version 0.4.1. All packages are licensed under Apache-2.0.
 
 ## Creating NuGet packages
 
-Run the batch file from the repository root to restore published dependencies, run the test suite, and create all six packages in a versioned directory such as `artifacts\packages\0.3.1`:
+Run the batch file from the repository root to restore published dependencies, run the test suite, and create all six packages in a versioned directory such as `artifacts\packages\0.4.1`:
 
 ```bat
 Create-NuGetPackages.bat
 ```
 
-Pass a version and optional output root to override the repository defaults. The version directory is appended automatically, so this example writes to `C:\packages\csweet-memory\0.3.1`:
+Pass a version and optional output root to override the repository defaults. The version directory is appended automatically, so this example writes to `C:\packages\csweet-memory\0.4.1`:
 
 ```bat
-Create-NuGetPackages.bat 0.3.1 C:\packages\csweet-memory
+Create-NuGetPackages.bat 0.4.1 C:\packages\csweet-memory
 ```
 
 ## Provenance and classification (0.2.0)

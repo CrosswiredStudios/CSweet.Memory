@@ -42,6 +42,7 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
             command.CommandText = Schema + IndexedSearchMigration;
             await command.ExecuteNonQueryAsync(cancellationToken);
             await UpgradeEntityAliasIndexAsync(connection, cancellationToken);
+            await UpgradeCoreSearchIndexAsync(connection, cancellationToken);
             _schemaInitialized = true;
         }
         finally { _initializeLock.Release(); }
@@ -297,8 +298,21 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
         if (Included(request, MemoryLayer.Core))
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT payload FROM memory_blocks WHERE partition_key=$partition ORDER BY pinned DESC,id LIMIT 100";
+            command.CommandText = $"""
+                SELECT b.payload FROM memory_blocks b
+                WHERE b.partition_key=$partition
+                  AND (($pinned=1 AND b.pinned=1) OR b.id IN (SELECT id FROM memory_blocks_fts WHERE content MATCH $query))
+                  AND csweet_utc_ticks(json_extract(b.payload,'$.updatedAt'))<=$now
+                  AND coalesce(json_extract(b.payload,'$.confirmation'),0) IN (0,2,CASE WHEN $pending=1 THEN 1 ELSE 2 END)
+                  AND {SourceHeadersEligible("b.payload", "b.partition_key")}
+                ORDER BY b.pinned DESC,b.id LIMIT $limit
+                """;
             command.Parameters.AddWithValue("$partition", request.Partition.StorageKey);
+            command.Parameters.AddWithValue("$pinned", request.IncludePinnedCore ? 1 : 0);
+            command.Parameters.AddWithValue("$query", lexical.FullText);
+            command.Parameters.AddWithValue("$now", now);
+            command.Parameters.AddWithValue("$pending", request.IncludePending ? 1 : 0);
+            command.Parameters.AddWithValue("$limit", request.Limit);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -338,13 +352,16 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
         if (Included(request, MemoryLayer.Semantic))
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = """
+            command.CommandText = $"""
                 SELECT c.payload,e.payload,p.payload,o.payload FROM memory_claims c
                 JOIN memory_entities e ON e.id=c.subject_id AND e.partition_key=c.partition_key
                 JOIN memory_episodes p ON p.id=c.episode_id AND p.partition_key=c.partition_key
                 LEFT JOIN memory_entities o ON o.id=json_extract(c.payload,'$.objectEntityId') AND o.partition_key=c.partition_key
                 WHERE c.partition_key=$partition AND (csweet_utc_ticks(c.valid_from)<=$now) AND ($superseded=1 OR c.valid_to IS NULL OR csweet_utc_ticks(c.valid_to)>$now)
                   AND c.confirmation IN (0,2,CASE WHEN $pending=1 THEN 1 ELSE 2 END)
+                  AND {SourceHeadersEligible("c.payload", "c.partition_key")}
+                  AND {SourceHeadersEligible("e.payload", "e.partition_key")}
+                  AND (json_extract(c.payload,'$.objectEntityId') IS NULL OR (o.id IS NOT NULL AND {SourceHeadersEligible("o.payload", "o.partition_key")}))
                   AND COALESCE(json_extract(p.payload,'$.isSuppressed'),0)=0 AND csweet_utc_ticks(p.occurred_at)<=$now AND (p.expires_at IS NULL OR csweet_utc_ticks(p.expires_at)>$now)
                   AND (c.id IN (SELECT id FROM memory_claims_fts WHERE content MATCH $query)
                     OR c.subject_id IN (SELECT id FROM memory_entities_fts WHERE content MATCH $query)
@@ -405,10 +422,11 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
         if (Included(request, MemoryLayer.Procedural))
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = """
+            command.CommandText = $"""
                 SELECT procedure.payload,source.payload FROM memory_procedures procedure
                 JOIN memory_episodes source ON source.id=procedure.episode_id AND source.partition_key=procedure.partition_key
                 WHERE procedure.partition_key=$partition AND procedure.confirmation IN (0,2)
+                    AND {SourceHeadersEligible("procedure.payload", "procedure.partition_key")}
                     AND csweet_utc_ticks(procedure.valid_from)<=$now AND (procedure.valid_to IS NULL OR csweet_utc_ticks(procedure.valid_to)>$now)
                     AND COALESCE(json_extract(source.payload,'$.isSuppressed'),0)=0 AND csweet_utc_ticks(source.occurred_at)<=$now AND (source.expires_at IS NULL OR csweet_utc_ticks(source.expires_at)>$now)
                     AND procedure.id IN (SELECT id FROM memory_procedures_fts WHERE content MATCH $query)

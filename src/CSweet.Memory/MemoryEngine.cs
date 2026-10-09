@@ -96,7 +96,8 @@ public sealed class MemoryEngine : IMemoryEngine
             if (!await _authorizer.CanReadAsync(memoryNamespace.Partition, memoryNamespace.Scope, request.Access, cancellationToken)) continue;
             var found = await _store.SearchAsync(new MemorySearchRequest(
                 memoryNamespace.Partition, memoryNamespace.Scope, request.Query, _options.RetrievalLimit,
-                request.AsOf, request.Layers, embedding, IncludePending: _options.IncludePendingClaims), cancellationToken);
+                request.AsOf, request.Layers, embedding, IncludePending: _options.IncludePendingClaims)
+                { IncludePinnedCore = true }, cancellationToken);
             foreach (var candidate in found)
             {
                 var allowed = true;

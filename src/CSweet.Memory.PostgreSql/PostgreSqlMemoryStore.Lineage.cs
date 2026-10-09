@@ -5,6 +5,26 @@ namespace CSweet.Memory;
 
 public sealed partial class PostgreSqlMemoryStore
 {
+    // Internal SQL expressions only. Avoid casting malformed legacy source IDs,
+    // and keep current sealed-transfer/classification resolution authoritative.
+    private static string SourceHeadersEligible(string payload, string partition)
+    {
+        var ids = $"CASE WHEN jsonb_typeof({payload}->'sourceEpisodeIds')='array' THEN {payload}->'sourceEpisodeIds' ELSE '[]'::jsonb END";
+        const string guidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+        return $"""
+            (jsonb_typeof({payload}->'sourceEpisodeIds')='array'
+             AND jsonb_array_length({ids})<={MemoryProvenance.MaximumSourceEpisodes}
+             AND NOT EXISTS (
+                 SELECT 1 FROM jsonb_array_elements_text({ids}) refs(id)
+                 LEFT JOIN csweet_memory_episodes upstream ON upstream.partition_key={partition}
+                    AND upstream.id=CASE WHEN refs.id ~ '{guidPattern}' THEN refs.id::uuid END
+                 WHERE upstream.id IS NULL OR refs.id='00000000-0000-0000-0000-000000000000'
+                    OR coalesce(upstream.payload->>'isSuppressed','false')<>'false'
+                    OR upstream.payload->>'occurredAt' IS NULL
+                    OR NOT {ValidAt("upstream.payload", "occurredAt", "expiresAt")}))
+            """;
+    }
+
     private static bool HasBoundedLineage(MemoryEntity entity) => entity.SourceEpisodeIds is not null &&
         entity.SourceEpisodeIds.Count <= MemoryProvenance.MaximumSourceEpisodes;
 

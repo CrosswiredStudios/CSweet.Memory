@@ -24,7 +24,12 @@ public sealed record MemorySearchRequest(
     IReadOnlySet<MemoryLayer>? Layers = null,
     IReadOnlyList<float>? Embedding = null,
     bool IncludePending = false,
-    bool IncludeSuperseded = false);
+    bool IncludeSuperseded = false)
+{
+    /// <summary>Include eligible pinned core context even when it does not match the query.
+    /// Ordinary search is topic-specific; context assembly opts in explicitly.</summary>
+    public bool IncludePinnedCore { get; init; }
+}
 
 public sealed record MemoryIngestRequest(
     MemoryPartition Partition,

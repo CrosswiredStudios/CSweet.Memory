@@ -56,6 +56,17 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
                 await using var command = new NpgsqlCommand(Schema + "INSERT INTO csweet_memory_schema_migrations(id) VALUES('indexed-search-v1');", connection, transaction);
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
+            await using var coreVersion = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM csweet_memory_schema_migrations WHERE id='indexed-core-search-v1')", connection, transaction);
+            if (await coreVersion.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                await using var core = new NpgsqlCommand("""
+                    ALTER TABLE csweet_memory_blocks ADD COLUMN IF NOT EXISTS search_vector tsvector
+                        GENERATED ALWAYS AS (to_tsvector('simple',name || ' ' || COALESCE(payload->>'content',''))) STORED;
+                    CREATE INDEX IF NOT EXISTS ix_csweet_memory_core_search ON csweet_memory_blocks USING GIN(search_vector);
+                    INSERT INTO csweet_memory_schema_migrations(id) VALUES('indexed-core-search-v1');
+                    """, connection, transaction);
+                await core.ExecuteNonQueryAsync(cancellationToken);
+            }
             await transaction.CommitAsync(cancellationToken);
             _schemaInitialized = true;
         }
@@ -253,8 +264,25 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
         var asOf = (request.AsOf ?? DateTimeOffset.UtcNow).ToUniversalTime();
         if (Included(request, MemoryLayer.Core))
         {
-            await foreach (var json in QueryPayloadsAsync("SELECT payload::text FROM csweet_memory_blocks WHERE partition_key=@partition ORDER BY pinned DESC,id LIMIT 100", request.Partition.StorageKey, cancellationToken))
+            var coreSql = $"""
+                SELECT b.payload::text FROM csweet_memory_blocks b
+                WHERE b.partition_key=@partition AND ((@pinned AND b.pinned) OR b.search_vector @@ websearch_to_tsquery('simple',@query))
+                  AND {TimeTicks("b.payload", "updatedAt")}<=@asOfTicks
+                  AND COALESCE((b.payload->>'confirmation')::int,0) IN (0,2,CASE WHEN @pending THEN 1 ELSE 2 END)
+                  AND {SourceHeadersEligible("b.payload", "b.partition_key")}
+                ORDER BY b.pinned DESC,b.id LIMIT @limit
+                """;
+            await using var core = CreateCommand(coreSql);
+            core.Parameters.AddWithValue("partition", request.Partition.StorageKey);
+            core.Parameters.AddWithValue("pinned", request.IncludePinnedCore);
+            core.Parameters.AddWithValue("query", lexical.FullText);
+            core.Parameters.AddWithValue("asOfTicks", EpochTicks(asOf));
+            core.Parameters.AddWithValue("pending", request.IncludePending);
+            core.Parameters.AddWithValue("limit", request.Limit);
+            await using var coreReader = await core.ExecuteReaderAsync(cancellationToken);
+            while (await coreReader.ReadAsync(cancellationToken))
             {
+                var json = coreReader.GetString(0);
                 var block = JsonSerializer.Deserialize<MemoryBlock>(json, JsonOptions)!;
                 if (block.Partition != request.Partition || block.UpdatedAt > asOf ||
                     (block.Confirmation is not (MemoryConfirmationState.NotRequired or MemoryConfirmationState.Confirmed) &&
@@ -295,6 +323,9 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
                 LEFT JOIN csweet_memory_entities o ON o.id=(c.payload->>'objectEntityId')::uuid AND o.partition_key=c.partition_key
                 WHERE c.partition_key=@partition AND {ValidAt("c.payload", "validFrom", "validTo", includeSuperseded: true)}
                   AND c.confirmation IN (0,2,CASE WHEN @pending THEN 1 ELSE 2 END)
+                  AND {SourceHeadersEligible("c.payload", "c.partition_key")}
+                  AND {SourceHeadersEligible("e.payload", "e.partition_key")}
+                  AND (c.payload->>'objectEntityId' IS NULL OR (o.id IS NOT NULL AND {SourceHeadersEligible("o.payload", "o.partition_key")}))
                   AND COALESCE(p.payload->>'isSuppressed','false')='false' AND {ValidAt("p.payload", "occurredAt", "expiresAt")}
                   AND (c.search_vector @@ websearch_to_tsquery('simple',@query)
                     OR c.subject_id IN (SELECT id FROM csweet_memory_entities WHERE partition_key=@partition AND search_vector @@ websearch_to_tsquery('simple',@query))
@@ -359,6 +390,7 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
                 SELECT procedure.payload::text,source.payload::text FROM csweet_memory_procedures procedure
                 JOIN csweet_memory_episodes source ON source.id=procedure.episode_id AND source.partition_key=procedure.partition_key
                 WHERE procedure.partition_key=@partition AND procedure.confirmation IN (0,2)
+                    AND {SourceHeadersEligible("procedure.payload", "procedure.partition_key")}
                     AND {ValidAt("procedure.payload", "validFrom", "validTo")}
                     AND COALESCE(source.payload->>'isSuppressed','false')='false' AND {ValidAt("source.payload", "occurredAt", "expiresAt")}
                     AND procedure.search_vector @@ websearch_to_tsquery('simple',@query)

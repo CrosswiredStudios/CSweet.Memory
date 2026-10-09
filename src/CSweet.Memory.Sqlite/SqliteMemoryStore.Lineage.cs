@@ -4,6 +4,23 @@ namespace CSweet.Memory;
 
 public sealed partial class SqliteMemoryStore
 {
+    // Direct contributor eligibility belongs before LIMIT. Full sealed-transfer and
+    // classification resolution still runs after selection; this is not authorization.
+    private static string SourceHeadersEligible(string payload, string partition, string instant = "$now") => $"""
+        (json_type({payload},'$.sourceEpisodeIds')='array'
+         AND json_array_length(json_extract({payload},'$.sourceEpisodeIds'))<={MemoryProvenance.MaximumSourceEpisodes}
+         AND NOT EXISTS (
+             SELECT 1 FROM json_each({payload},'$.sourceEpisodeIds') refs
+             LEFT JOIN memory_episodes upstream ON upstream.id=refs.value AND upstream.partition_key={partition}
+             WHERE upstream.id IS NULL OR refs.value='00000000-0000-0000-0000-000000000000'
+                OR coalesce(json_extract(upstream.payload,'$.isSuppressed'),0)<>0
+                OR csweet_utc_ticks(json_extract(upstream.payload,'$.occurredAt')) IS NULL
+                OR csweet_utc_ticks(json_extract(upstream.payload,'$.occurredAt'))>{instant}
+                OR (json_extract(upstream.payload,'$.expiresAt') IS NOT NULL AND
+                    (csweet_utc_ticks(json_extract(upstream.payload,'$.expiresAt')) IS NULL OR
+                     csweet_utc_ticks(json_extract(upstream.payload,'$.expiresAt'))<={instant}))))
+        """;
+
     private static bool HasBoundedLineage(MemoryEntity entity) => entity.SourceEpisodeIds is not null &&
         entity.SourceEpisodeIds.Count <= MemoryProvenance.MaximumSourceEpisodes;
 
