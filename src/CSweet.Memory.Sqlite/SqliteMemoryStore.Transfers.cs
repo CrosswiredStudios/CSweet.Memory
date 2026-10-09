@@ -19,11 +19,12 @@ public sealed partial class SqliteMemoryStore
     }
 
     private async Task<IReadOnlyList<MemoryEpisode>> ResolveTransferEpisodesAsync(IReadOnlyList<MemoryEpisode> episodes,
-        DateTimeOffset asOf, CancellationToken cancellationToken)
+        DateTimeOffset asOf, CancellationToken cancellationToken, MemorySearchBudget? budget = null)
     {
         if (!episodes.Any(x => x.TransferEvidence is not null || x.CorrectionEvidence is not null || x.SourceFingerprint?.StartsWith("sha256-v3:", StringComparison.Ordinal) == true || string.Equals(x.Source.Type, "knowledge-transfer", StringComparison.OrdinalIgnoreCase))) return episodes;
         await using var connection = await OpenAsync(cancellationToken);
-        var resolver = new MemoryTransferEvidenceStorage(sql => { var command = connection.CreateCommand(); command.CommandText = sql; return command; }, false, asOf);
+        var resolver = new MemoryTransferEvidenceStorage(sql => { var command = connection.CreateCommand(); command.CommandText = sql; return command; }, false, asOf,
+            budget is null ? null : () => budget.Source(), budget is null ? null : budget.Payload);
         var results = new List<MemoryEpisode>(episodes.Count);
         foreach (var episode in episodes) results.Add(await resolver.ResolveAsync(episode, cancellationToken));
         return results;

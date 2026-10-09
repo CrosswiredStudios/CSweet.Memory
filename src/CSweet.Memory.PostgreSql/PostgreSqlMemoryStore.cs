@@ -254,12 +254,13 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<MemoryCandidate>> SearchAsync(MemorySearchRequest request, CancellationToken cancellationToken = default)
+    private async Task<MemorySearchPage<MemoryCandidate>> SearchPageAsync(MemorySearchRequest request, int offset, MemorySearchBudget budget, CancellationToken cancellationToken)
     {
         await InitializeAsync(cancellationToken);
         var results = new List<MemoryCandidate>();
+        var rows = 0;
         var lexical = MemoryLexicalQuery.Parse(request.Query);
-        if (lexical.Terms.Count == 0) return results;
+        if (lexical.Terms.Count == 0) return new(results, rows);
         request = request with { Limit = Math.Clamp(request.Limit, 1, 100) };
         var asOf = (request.AsOf ?? DateTimeOffset.UtcNow).ToUniversalTime();
         if (Included(request, MemoryLayer.Core))
@@ -270,7 +271,7 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
                   AND {TimeTicks("b.payload", "updatedAt")}<=@asOfTicks
                   AND COALESCE((b.payload->>'confirmation')::int,0) IN (0,2,CASE WHEN @pending THEN 1 ELSE 2 END)
                   AND {SourceHeadersEligible("b.payload", "b.partition_key")}
-                ORDER BY b.pinned DESC,b.id LIMIT @limit
+                ORDER BY b.pinned DESC,b.id LIMIT @limit OFFSET @offset
                 """;
             await using var core = CreateCommand(coreSql);
             core.Parameters.AddWithValue("partition", request.Partition.StorageKey);
@@ -279,10 +280,13 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
             core.Parameters.AddWithValue("asOfTicks", EpochTicks(asOf));
             core.Parameters.AddWithValue("pending", request.IncludePending);
             core.Parameters.AddWithValue("limit", request.Limit);
+            core.Parameters.AddWithValue("offset", offset);
             await using var coreReader = await core.ExecuteReaderAsync(cancellationToken);
             while (await coreReader.ReadAsync(cancellationToken))
             {
-                var json = coreReader.GetString(0);
+                budget.Candidate();
+                rows++;
+                var json = budget.Payload(coreReader.GetString(0));
                 var block = JsonSerializer.Deserialize<MemoryBlock>(json, JsonOptions)!;
                 if (block.Partition != request.Partition || block.UpdatedAt > asOf ||
                     (block.Confirmation is not (MemoryConfirmationState.NotRequired or MemoryConfirmationState.Confirmed) &&
@@ -298,17 +302,20 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
                 SELECT payload::text,ts_rank_cd(search_vector,websearch_to_tsquery('simple',@query),2) score FROM csweet_memory_episodes
                 WHERE partition_key=@partition AND search_vector @@ websearch_to_tsquery('simple',@query)
                     AND COALESCE(payload->>'isSuppressed','false')='false' AND {ValidAt("payload", "occurredAt", "expiresAt")}
-                ORDER BY score DESC,id LIMIT @limit
+                ORDER BY score DESC,id LIMIT @limit OFFSET @offset
                 """;
             await using var command = CreateCommand(sql);
             command.Parameters.AddWithValue("partition", request.Partition.StorageKey);
             command.Parameters.AddWithValue("query", lexical.FullText);
             command.Parameters.AddWithValue("asOfTicks", EpochTicks(asOf));
             command.Parameters.AddWithValue("limit", request.Limit);
+            command.Parameters.AddWithValue("offset", offset);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var episode = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(0), JsonOptions)!;
+                budget.Candidate();
+                rows++;
+                var episode = JsonSerializer.Deserialize<MemoryEpisode>(budget.Payload(reader.GetString(0)), JsonOptions)!;
                 if (!MemoryProvenance.IsSnapshotCurrent(episode, request.Partition, episode.Id, asOf)) continue;
                 results.Add(new(episode.Id, MemoryLayer.Episodic, episode.Content, reader.GetDouble(1), SourceTrust(episode.Source.Type),
                     MemoryConfirmationState.NotRequired, episode.Sensitivity, episode.OccurredAt, episode.ExpiresAt, [episode.Id], "fulltext"));
@@ -332,7 +339,7 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
                     OR (c.payload->>'objectEntityId')::uuid IN (SELECT id FROM csweet_memory_entities WHERE partition_key=@partition AND search_vector @@ websearch_to_tsquery('simple',@query)))
                 ORDER BY (lower(e.canonical_name)=@phrase OR lower(o.canonical_name)=@phrase) DESC NULLS LAST,
                     ts_rank_cd(c.search_vector,phraseto_tsquery('simple',@phrase)) DESC,
-                    ts_rank_cd(c.search_vector,websearch_to_tsquery('simple',@query)) DESC,c.id LIMIT @limit
+                    ts_rank_cd(c.search_vector,websearch_to_tsquery('simple',@query)) DESC,c.id LIMIT @limit OFFSET @offset
                 """;
             await using var command = CreateCommand(sql);
             command.Parameters.AddWithValue("partition", request.Partition.StorageKey);
@@ -342,13 +349,16 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
             command.Parameters.AddWithValue("phrase", string.Join(' ', lexical.Terms));
             command.Parameters.AddWithValue("query", lexical.FullText);
             command.Parameters.AddWithValue("limit", request.Limit);
+            command.Parameters.AddWithValue("offset", offset);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var claim = JsonSerializer.Deserialize<MemoryClaim>(reader.GetString(0), JsonOptions)!;
-                var subject = JsonSerializer.Deserialize<MemoryEntity>(reader.GetString(1), JsonOptions)!;
-                var source = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(2), JsonOptions)!;
-                var objectEntity = reader.IsDBNull(3) ? null : JsonSerializer.Deserialize<MemoryEntity>(reader.GetString(3), JsonOptions);
+                budget.Candidate();
+                rows++;
+                var claim = JsonSerializer.Deserialize<MemoryClaim>(budget.Payload(reader.GetString(0)), JsonOptions)!;
+                var subject = JsonSerializer.Deserialize<MemoryEntity>(budget.Payload(reader.GetString(1)), JsonOptions)!;
+                var source = JsonSerializer.Deserialize<MemoryEpisode>(budget.Payload(reader.GetString(2)), JsonOptions)!;
+                var objectEntity = reader.IsDBNull(3) ? null : JsonSerializer.Deserialize<MemoryEntity>(budget.Payload(reader.GetString(3)), JsonOptions);
                 var resolved = MemoryProvenance.ResolveClaimReferences(claim, source, subject, objectEntity, asOf, snapshotOnly: true);
                 if (claim.Partition != request.Partition || resolved is null || !MemoryProvenance.HasBoundedSources(claim.SourceEpisodeIds) ||
                     !HasBoundedLineage(subject) || (objectEntity is not null && !HasBoundedLineage(objectEntity))) continue;
@@ -360,30 +370,9 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
             }
 
             await reader.DisposeAsync();
-            results.AddRange(await SearchGraphAsync(request, lexical, asOf, cancellationToken));
+
         }
 
-        if (request.Embedding is { Count: > 0 } && Included(request, MemoryLayer.Episodic))
-        {
-            var vectorSql = $"SELECT embedding.payload::text,episode.payload::text FROM csweet_memory_embeddings embedding JOIN csweet_memory_episodes episode ON episode.id=embedding.memory_id AND episode.partition_key=embedding.partition_key WHERE embedding.partition_key=@partition AND embedding.layer=1 AND COALESCE(episode.payload->>'isSuppressed','false')='false' AND {ValidAt("episode.payload", "occurredAt", "expiresAt")} ORDER BY embedding.id LIMIT 1024";
-            await using var vector = CreateCommand(vectorSql);
-            vector.Parameters.AddWithValue("partition", request.Partition.StorageKey);
-            vector.Parameters.AddWithValue("asOfTicks", EpochTicks(asOf));
-            var vectorCandidates = new List<MemoryCandidate>();
-            await using var vectorReader = await vector.ExecuteReaderAsync(cancellationToken);
-            while (await vectorReader.ReadAsync(cancellationToken))
-            {
-                var embedding = JsonSerializer.Deserialize<MemoryEmbedding>(vectorReader.GetString(0), JsonOptions)!;
-                if (embedding.Vector.Count != request.Embedding.Count) continue;
-                var episode = JsonSerializer.Deserialize<MemoryEpisode>(vectorReader.GetString(1), JsonOptions)!;
-                if (embedding.Partition != request.Partition || embedding.Layer != MemoryLayer.Episodic ||
-                    !MemoryProvenance.IsSnapshotCurrent(episode, request.Partition, embedding.MemoryId, asOf)) continue;
-                vectorCandidates.Add(new(episode.Id, MemoryLayer.Episodic, episode.Content, CosineSimilarity(request.Embedding, embedding.Vector),
-                    SourceTrust(episode.Source.Type), MemoryConfirmationState.NotRequired, episode.Sensitivity,
-                    episode.OccurredAt, episode.ExpiresAt, [episode.Id], "vector"));
-            }
-            results.AddRange(vectorCandidates.OrderByDescending(candidate => candidate.Score).Take(request.Limit));
-        }
         if (Included(request, MemoryLayer.Procedural))
         {
             var sql = $"""
@@ -396,7 +385,7 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
                     AND procedure.search_vector @@ websearch_to_tsquery('simple',@query)
                 ORDER BY (lower(procedure.name)=@phrase) DESC,
                     ts_rank_cd(procedure.search_vector,phraseto_tsquery('simple',@phrase)) DESC,
-                    ts_rank_cd(procedure.search_vector,websearch_to_tsquery('simple',@query)) DESC,procedure.id LIMIT @limit
+                    ts_rank_cd(procedure.search_vector,websearch_to_tsquery('simple',@query)) DESC,procedure.id LIMIT @limit OFFSET @offset
                 """;
             await using var command = CreateCommand(sql);
             command.Parameters.AddWithValue("partition", request.Partition.StorageKey);
@@ -404,18 +393,21 @@ public sealed partial class PostgreSqlMemoryStore : IMemoryStore, IKnowledgeTran
             command.Parameters.AddWithValue("query", lexical.FullText);
             command.Parameters.AddWithValue("phrase", string.Join(' ', lexical.Terms));
             command.Parameters.AddWithValue("limit", request.Limit);
+            command.Parameters.AddWithValue("offset", offset);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var procedure = JsonSerializer.Deserialize<ProceduralMemory>(reader.GetString(0), JsonOptions)!;
-                var source = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(1), JsonOptions);
+                budget.Candidate();
+                rows++;
+                var procedure = JsonSerializer.Deserialize<ProceduralMemory>(budget.Payload(reader.GetString(0)), JsonOptions)!;
+                var source = JsonSerializer.Deserialize<MemoryEpisode>(budget.Payload(reader.GetString(1)), JsonOptions);
                 if (procedure.Partition != request.Partition || !MemoryProvenance.HasBoundedSources(procedure.SourceEpisodeIds) ||
                     !MemoryProvenance.IsSnapshotCurrent(source, request.Partition, procedure.EpisodeId, asOf)) continue;
                 results.Add(new(procedure.Id, MemoryLayer.Procedural, procedure.Procedure, 1, procedure.Trust, procedure.Confirmation,
                     source!.Sensitivity, procedure.ValidFrom, procedure.ValidTo, new[] { procedure.EpisodeId }.Concat(procedure.SourceEpisodeIds).Distinct().ToArray(), "procedure"));
             }
         }
-        return await ResolveCandidatesAsync(results, request.Partition, asOf, cancellationToken);
+        return new(results, rows);
     }
 
     public async Task SupersedeClaimAsync(Guid claimId, Guid supersededByClaimId, DateTimeOffset validTo, CancellationToken cancellationToken = default)

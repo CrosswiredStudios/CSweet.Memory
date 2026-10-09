@@ -36,9 +36,10 @@ public sealed partial class PostgreSqlMemoryStore
         """;
 
     private async Task<Dictionary<Guid, MemoryEpisode>> LoadLineageSourcesAsync(MemoryPartition partition,
-        IEnumerable<Guid> ids, CancellationToken cancellationToken, DateTimeOffset? asOf = null)
+        IEnumerable<Guid> ids, CancellationToken cancellationToken, DateTimeOffset? asOf = null, MemorySearchBudget? budget = null)
     {
         var selected = ids.Distinct().Take(MemoryProvenance.MaximumReadSourceEpisodes + 1).ToArray();
+        budget?.Source(selected.Length);
         var sources = new Dictionary<Guid, MemoryEpisode>();
         if (selected.Length == 0 || selected.Length > MemoryProvenance.MaximumReadSourceEpisodes) return sources;
         await using var command = CreateCommand("SELECT payload::text FROM csweet_memory_episodes WHERE partition_key=@partition AND id=ANY(@ids)");
@@ -47,11 +48,11 @@ public sealed partial class PostgreSqlMemoryStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var source = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(0), JsonOptions)!;
+            var source = JsonSerializer.Deserialize<MemoryEpisode>(budget is null ? reader.GetString(0) : budget.Payload(reader.GetString(0)), JsonOptions)!;
             if (source.Partition == partition) sources[source.Id] = source;
         }
         await reader.DisposeAsync();
-        return (await ResolveTransferEpisodesAsync(sources.Values.ToArray(), asOf ?? DateTimeOffset.UtcNow, cancellationToken)).ToDictionary(x => x.Id);
+        return (await ResolveTransferEpisodesAsync(sources.Values.ToArray(), asOf ?? DateTimeOffset.UtcNow, cancellationToken, budget)).ToDictionary(x => x.Id);
     }
 
     private async Task<MemoryEntity?> ResolveEntityAsync(MemoryEntity? entity, MemoryPartition partition,
@@ -63,9 +64,9 @@ public sealed partial class PostgreSqlMemoryStore
     }
 
     private async Task<IReadOnlyList<MemoryCandidate>> ResolveCandidatesAsync(List<MemoryCandidate> candidates,
-        MemoryPartition partition, DateTimeOffset asOf, CancellationToken cancellationToken)
+        MemoryPartition partition, DateTimeOffset asOf, CancellationToken cancellationToken, MemorySearchBudget? budget = null)
     {
-        var sources = await LoadLineageSourcesAsync(partition, candidates.SelectMany(x => x.EpisodeIds), cancellationToken, asOf);
+        var sources = await LoadLineageSourcesAsync(partition, candidates.SelectMany(x => x.EpisodeIds), cancellationToken, asOf, budget);
         return candidates.Select(candidate => MemoryProvenance.ResolveSensitivity(partition, candidate.Sensitivity,
                 candidate.EpisodeIds, sources, asOf, candidate.RetrievalChannel == "graph" ? MemoryGraphTraversal.MaximumCandidateSources : 3 * MemoryProvenance.MaximumSourceEpisodes + 1) is { } sensitivity
             ? candidate with { Sensitivity = sensitivity, RequiredSharedPartitions =

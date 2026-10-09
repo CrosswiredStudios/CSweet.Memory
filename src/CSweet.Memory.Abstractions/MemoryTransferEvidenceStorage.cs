@@ -3,7 +3,8 @@ using System.Text.Json;
 
 namespace CSweet.Memory;
 
-internal sealed partial class MemoryTransferEvidenceStorage(Func<string, DbCommand> commandFactory, bool postgres, DateTimeOffset asOf)
+internal sealed partial class MemoryTransferEvidenceStorage(Func<string, DbCommand> commandFactory, bool postgres, DateTimeOffset asOf,
+    Action? sourceRead = null, Func<string, string>? payloadRead = null)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly string[] Tables = ["episodes", "entities", "claims", "edges", "blocks", "procedures"];
@@ -268,6 +269,7 @@ internal sealed partial class MemoryTransferEvidenceStorage(Func<string, DbComma
         if (id == Guid.Empty || (int)kind is < 0 or >= 6) return null;
         var key = (partition, kind, id);
         if (cache.TryGetValue(key, out var existing)) return existing;
+        sourceRead?.Invoke();
         if (++reads > MemoryProvenance.MaximumReadSourceEpisodes) throw Invalid();
         var table = Prefix + Tables[(int)kind];
         await using var command = commandFactory($"""
@@ -282,7 +284,7 @@ internal sealed partial class MemoryTransferEvidenceStorage(Func<string, DbComma
         Snapshot? snapshot = null;
         if (await reader.ReadAsync(token) && !reader.IsDBNull(1))
         {
-            using var document = JsonDocument.Parse(reader.GetString(0)); var payload = document.RootElement;
+            using var document = JsonDocument.Parse(ReadPayload(reader.GetString(0))); var payload = document.RootElement;
             if (payload.GetProperty("id").GetGuid() == id && payload.GetProperty("partition").Deserialize<MemoryPartition>(Json) == partition)
                 snapshot = new(new(partition, kind, id, reader.GetInt64(1)), payload.Clone());
         }
@@ -293,12 +295,15 @@ internal sealed partial class MemoryTransferEvidenceStorage(Func<string, DbComma
     {
         if (id == Guid.Empty) return null;
         if (packages.TryGetValue(id, out var existing)) return existing;
+        sourceRead?.Invoke();
         if (++reads > MemoryProvenance.MaximumReadSourceEpisodes) throw Invalid();
         await using var command = commandFactory($"SELECT CAST(payload AS text) FROM {Prefix}transfers WHERE id=@id AND NOT EXISTS(SELECT 1 FROM {Prefix}partition_migration_rows WHERE table_name=@table AND record_id=CAST(@id AS text) AND disposition='Quarantine')");
         Add(command, "id", postgres ? id : id.ToString("D")); Add(command, "table", Prefix + "transfers");
         var payload = (string?)await command.ExecuteScalarAsync(token);
-        return packages[id] = payload is null ? null : JsonSerializer.Deserialize<KnowledgeTransferPackage>(payload, Json);
+        return packages[id] = payload is null ? null : JsonSerializer.Deserialize<KnowledgeTransferPackage>(ReadPayload(payload), Json);
     }
+
+    private string ReadPayload(string value) => payloadRead?.Invoke(value) ?? value;
 
     private bool ValidAudience(KnowledgeTransferPackage p)
     {

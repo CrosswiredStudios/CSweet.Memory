@@ -113,13 +113,14 @@ internal sealed partial class MemoryTransferEvidenceStorage
     private async Task<Snapshot?> RetainedRevisionAsync(MemoryTransferRecord reference, CancellationToken token)
     {
         if (retainedRevisions.TryGetValue(reference, out var existing)) return existing;
+        sourceRead?.Invoke();
         if (++reads > MemoryProvenance.MaximumReadSourceEpisodes) throw Invalid();
         await using var command = commandFactory($"SELECT CAST(payload AS text) FROM {Prefix}revisions WHERE partition_key=@partition AND kind=@kind AND record_id=@id AND revision=@revision");
         Add(command,"partition",reference.Partition.StorageKey); Add(command,"kind",(int)reference.Kind);
         Add(command,"id",postgres ? reference.Id : reference.Id.ToString("D")); Add(command,"revision",reference.Revision);
         var payload=await command.ExecuteScalarAsync(token) as string;
         if (payload is null) return retainedRevisions[reference]=null;
-        using var document=JsonDocument.Parse(payload); var value=document.RootElement;
+        using var document=JsonDocument.Parse(ReadPayload(payload)); var value=document.RootElement;
         if (value.GetProperty("id").GetGuid()!=reference.Id || value.GetProperty("partition").Deserialize<MemoryPartition>(Json)!=reference.Partition)
             return retainedRevisions[reference]=null;
         return retainedRevisions[reference]=new(reference,value.Clone());

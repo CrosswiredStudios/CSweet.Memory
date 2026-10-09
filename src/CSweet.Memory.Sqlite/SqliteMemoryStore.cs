@@ -286,11 +286,12 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<MemoryCandidate>> SearchAsync(MemorySearchRequest request, CancellationToken cancellationToken = default)
+    private async Task<MemorySearchPage<MemoryCandidate>> SearchPageAsync(MemorySearchRequest request, int offset, MemorySearchBudget budget, CancellationToken cancellationToken)
     {
         var results = new List<MemoryCandidate>();
+        var rows = 0;
         var lexical = MemoryLexicalQuery.Parse(request.Query);
-        if (lexical.Terms.Count == 0) return results;
+        if (lexical.Terms.Count == 0) return new(results, rows);
         request = request with { Limit = Math.Clamp(request.Limit, 1, 100) };
         await using var connection = await OpenAsync(cancellationToken);
         var asOf = request.AsOf ?? DateTimeOffset.UtcNow;
@@ -305,7 +306,7 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
                   AND csweet_utc_ticks(json_extract(b.payload,'$.updatedAt'))<=$now
                   AND coalesce(json_extract(b.payload,'$.confirmation'),0) IN (0,2,CASE WHEN $pending=1 THEN 1 ELSE 2 END)
                   AND {SourceHeadersEligible("b.payload", "b.partition_key")}
-                ORDER BY b.pinned DESC,b.id LIMIT $limit
+                ORDER BY b.pinned DESC,b.id LIMIT $limit OFFSET $offset
                 """;
             command.Parameters.AddWithValue("$partition", request.Partition.StorageKey);
             command.Parameters.AddWithValue("$pinned", request.IncludePinnedCore ? 1 : 0);
@@ -313,10 +314,13 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
             command.Parameters.AddWithValue("$now", now);
             command.Parameters.AddWithValue("$pending", request.IncludePending ? 1 : 0);
             command.Parameters.AddWithValue("$limit", request.Limit);
+            command.Parameters.AddWithValue("$offset", offset);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var block = JsonSerializer.Deserialize<MemoryBlock>(reader.GetString(0), JsonOptions)!;
+                budget.Candidate();
+                rows++;
+                var block = JsonSerializer.Deserialize<MemoryBlock>(budget.Payload(reader.GetString(0)), JsonOptions)!;
                 if (block.Partition != request.Partition || block.UpdatedAt > asOf ||
                     (block.Confirmation is not (MemoryConfirmationState.NotRequired or MemoryConfirmationState.Confirmed) &&
                      !(request.IncludePending && block.Confirmation == MemoryConfirmationState.Pending)) ||
@@ -331,17 +335,20 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
             command.CommandText = """
                 SELECT e.payload FROM memory_episodes e JOIN memory_episodes_fts f ON f.id=e.id
                 WHERE e.partition_key=$partition AND f.content MATCH $query AND COALESCE(json_extract(e.payload,'$.isSuppressed'),0)=0 AND csweet_utc_ticks(e.occurred_at)<=$now AND (e.expires_at IS NULL OR csweet_utc_ticks(e.expires_at)>$now)
-                ORDER BY bm25(memory_episodes_fts),e.id LIMIT $limit
+                ORDER BY bm25(memory_episodes_fts),e.id LIMIT $limit OFFSET $offset
                 """;
             command.Parameters.AddWithValue("$partition", request.Partition.StorageKey);
             command.Parameters.AddWithValue("$query", lexical.FullText);
             command.Parameters.AddWithValue("$now", now);
             command.Parameters.AddWithValue("$limit", request.Limit);
+            command.Parameters.AddWithValue("$offset", offset);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            var score = 1d;
+            var score = Math.Max(0.1, 1 - 0.02 * offset);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var episode = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(0), JsonOptions)!;
+                budget.Candidate();
+                rows++;
+                var episode = JsonSerializer.Deserialize<MemoryEpisode>(budget.Payload(reader.GetString(0)), JsonOptions)!;
                 if (!MemoryProvenance.IsSnapshotCurrent(episode, request.Partition, episode.Id, asOf)) continue;
                 results.Add(new MemoryCandidate(episode.Id, MemoryLayer.Episodic, episode.Content, score,
                     SourceTrust(episode.Source.Type), MemoryConfirmationState.NotRequired, episode.Sensitivity,
@@ -367,7 +374,7 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
                     OR c.subject_id IN (SELECT id FROM memory_entities_fts WHERE content MATCH $query)
                     OR json_extract(c.payload,'$.objectEntityId') IN (SELECT id FROM memory_entities_fts WHERE content MATCH $query))
                 ORDER BY (lower(e.canonical_name)=$phrase OR lower(o.canonical_name)=$phrase) DESC,
-                    instr(lower(c.predicate||' '||coalesce(c.value,'')),$phrase)>0 DESC,c.id LIMIT $limit
+                    instr(lower(c.predicate||' '||coalesce(c.value,'')),$phrase)>0 DESC,c.id LIMIT $limit OFFSET $offset
                 """;
             command.Parameters.AddWithValue("$partition", request.Partition.StorageKey);
             command.Parameters.AddWithValue("$now", now);
@@ -376,13 +383,16 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
             command.Parameters.AddWithValue("$phrase", string.Join(' ', lexical.Terms));
             command.Parameters.AddWithValue("$query", lexical.FullText);
             command.Parameters.AddWithValue("$limit", request.Limit);
+            command.Parameters.AddWithValue("$offset", offset);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var claim = JsonSerializer.Deserialize<MemoryClaim>(reader.GetString(0), JsonOptions)!;
-                var subject = JsonSerializer.Deserialize<MemoryEntity>(reader.GetString(1), JsonOptions)!;
-                var source = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(2), JsonOptions)!;
-                var objectEntity = reader.IsDBNull(3) ? null : JsonSerializer.Deserialize<MemoryEntity>(reader.GetString(3), JsonOptions);
+                budget.Candidate();
+                rows++;
+                var claim = JsonSerializer.Deserialize<MemoryClaim>(budget.Payload(reader.GetString(0)), JsonOptions)!;
+                var subject = JsonSerializer.Deserialize<MemoryEntity>(budget.Payload(reader.GetString(1)), JsonOptions)!;
+                var source = JsonSerializer.Deserialize<MemoryEpisode>(budget.Payload(reader.GetString(2)), JsonOptions)!;
+                var objectEntity = reader.IsDBNull(3) ? null : JsonSerializer.Deserialize<MemoryEntity>(budget.Payload(reader.GetString(3)), JsonOptions);
                 var resolved = MemoryProvenance.ResolveClaimReferences(claim, source, subject, objectEntity, asOf, snapshotOnly: true);
                 if (claim.Partition != request.Partition || resolved is null || !MemoryProvenance.HasBoundedSources(claim.SourceEpisodeIds) ||
                     !HasBoundedLineage(subject) || (objectEntity is not null && !HasBoundedLineage(objectEntity))) continue;
@@ -394,31 +404,9 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
             }
 
             await reader.DisposeAsync();
-            results.AddRange(await SearchGraphAsync(request, lexical, asOf, cancellationToken));
+
         }
 
-        if (request.Embedding is { Count: > 0 } && Included(request, MemoryLayer.Episodic))
-        {
-            var vectorCandidates = new List<MemoryCandidate>();
-            await using var vector = connection.CreateCommand();
-            vector.CommandText = "SELECT embedding.payload,episode.payload FROM memory_embeddings embedding JOIN memory_episodes episode ON episode.id=embedding.memory_id AND episode.partition_key=embedding.partition_key WHERE embedding.partition_key=$partition AND embedding.layer=1 AND COALESCE(json_extract(episode.payload,'$.isSuppressed'),0)=0 AND csweet_utc_ticks(episode.occurred_at)<=$now AND (episode.expires_at IS NULL OR csweet_utc_ticks(episode.expires_at)>$now) ORDER BY embedding.id LIMIT 1024";
-            vector.Parameters.AddWithValue("$partition", request.Partition.StorageKey);
-            vector.Parameters.AddWithValue("$now", now);
-            await using var vectorReader = await vector.ExecuteReaderAsync(cancellationToken);
-            while (await vectorReader.ReadAsync(cancellationToken))
-            {
-                var embedding = JsonSerializer.Deserialize<MemoryEmbedding>(vectorReader.GetString(0), JsonOptions)!;
-                if (embedding.Vector.Count != request.Embedding.Count) continue;
-                var episode = JsonSerializer.Deserialize<MemoryEpisode>(vectorReader.GetString(1), JsonOptions)!;
-                if (embedding.Partition != request.Partition || embedding.Layer != MemoryLayer.Episodic ||
-                    !MemoryProvenance.IsSnapshotCurrent(episode, request.Partition, embedding.MemoryId, asOf)) continue;
-                vectorCandidates.Add(new MemoryCandidate(episode.Id, MemoryLayer.Episodic, episode.Content,
-                    CosineSimilarity(request.Embedding, embedding.Vector), SourceTrust(episode.Source.Type),
-                    MemoryConfirmationState.NotRequired, episode.Sensitivity,
-                    episode.OccurredAt, episode.ExpiresAt, [episode.Id], "vector"));
-            }
-            results.AddRange(vectorCandidates.OrderByDescending(candidate => candidate.Score).Take(request.Limit));
-        }
         if (Included(request, MemoryLayer.Procedural))
         {
             await using var command = connection.CreateCommand();
@@ -431,18 +419,21 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
                     AND COALESCE(json_extract(source.payload,'$.isSuppressed'),0)=0 AND csweet_utc_ticks(source.occurred_at)<=$now AND (source.expires_at IS NULL OR csweet_utc_ticks(source.expires_at)>$now)
                     AND procedure.id IN (SELECT id FROM memory_procedures_fts WHERE content MATCH $query)
                 ORDER BY (lower(procedure.name)=$phrase) DESC,
-                    instr(lower(json_extract(procedure.payload,'$.procedure')),$phrase)>0 DESC,procedure.id LIMIT $limit
+                    instr(lower(json_extract(procedure.payload,'$.procedure')),$phrase)>0 DESC,procedure.id LIMIT $limit OFFSET $offset
                 """;
             command.Parameters.AddWithValue("$partition", request.Partition.StorageKey);
             command.Parameters.AddWithValue("$now", now);
             command.Parameters.AddWithValue("$query", lexical.FullText);
             command.Parameters.AddWithValue("$phrase", string.Join(' ', lexical.Terms));
             command.Parameters.AddWithValue("$limit", request.Limit);
+            command.Parameters.AddWithValue("$offset", offset);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var procedure = JsonSerializer.Deserialize<ProceduralMemory>(reader.GetString(0), JsonOptions)!;
-                var source = JsonSerializer.Deserialize<MemoryEpisode>(reader.GetString(1), JsonOptions);
+                budget.Candidate();
+                rows++;
+                var procedure = JsonSerializer.Deserialize<ProceduralMemory>(budget.Payload(reader.GetString(0)), JsonOptions)!;
+                var source = JsonSerializer.Deserialize<MemoryEpisode>(budget.Payload(reader.GetString(1)), JsonOptions);
                 if (procedure.Partition != request.Partition || !MemoryProvenance.HasBoundedSources(procedure.SourceEpisodeIds) ||
                     !MemoryProvenance.IsSnapshotCurrent(source, request.Partition, procedure.EpisodeId, asOf)) continue;
                 results.Add(new MemoryCandidate(procedure.Id, MemoryLayer.Procedural, procedure.Procedure, 1,
@@ -450,7 +441,7 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeTransfer
                     procedure.ValidFrom, procedure.ValidTo, new[] { procedure.EpisodeId }.Concat(procedure.SourceEpisodeIds).Distinct().ToArray(), "procedure"));
             }
         }
-        return await ResolveCandidatesAsync(results, request.Partition, asOf, cancellationToken);
+        return new(results, rows);
     }
 
     public async Task SupersedeClaimAsync(Guid claimId, Guid supersededByClaimId, DateTimeOffset validTo, CancellationToken cancellationToken = default)
