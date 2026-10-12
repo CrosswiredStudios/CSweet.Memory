@@ -336,7 +336,7 @@ package = await memory.ApplyKnowledgeTransferAsync(
     new(package.Id, managerAccess));
 ```
 
-The vendor-neutral packages target .NET 8 or later. `CSweet.Memory.Broker` 0.5.0 targets .NET 10 and pins `CSweet.Agent.SDK` 3.30.0, including when sibling project references are disabled. All six memory packages are version 0.5.0. All packages are licensed under Apache-2.0.
+The vendor-neutral packages target .NET 8 or later and remain version 0.5.0. `CSweet.Memory.Broker` 0.5.1 targets .NET 10 and pins `CSweet.Agent.SDK` 3.65.0, including when sibling project references are disabled. The broker patch synchronizes this dependency; it adds no memory ingestion, recall or succession behavior. All packages are licensed under Apache-2.0.
 
 ## Creating NuGet packages
 
