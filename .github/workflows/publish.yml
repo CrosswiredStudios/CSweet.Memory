@@ -48,15 +48,20 @@ jobs:
         run: |
           $props = [xml](Get-Content Directory.Build.props)
           $version = [string]$props.Project.PropertyGroup.Version
+          $broker = [xml](Get-Content src/CSweet.Memory.Broker/CSweet.Memory.Broker.csproj)
+          $brokerVersion = [string]$broker.Project.PropertyGroup.Version
           if ([string]::IsNullOrWhiteSpace($version)) {
             throw "Version must be defined in Directory.Build.props."
           }
           if ('${{ github.ref_type }}' -eq 'tag') {
             $tagVersion = '${{ github.ref_name }}'.TrimStart('v')
-            if ($tagVersion -ne $version) {
-              throw "Tag version $tagVersion does not match package version $version."
+            if ($tagVersion -notin @($version, $brokerVersion)) {
+              throw "Tag version $tagVersion does not match library version $version or broker version $brokerVersion."
             }
+            $version = $tagVersion
           }
+          $notes = "releases/$version.md"
+          if (-not (Test-Path $notes)) { throw "Release notes are missing: $notes." }
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
       - run: dotnet restore CSweet.Memory.slnx -p:UseLocalCSweetAgentSdk=false
@@ -72,10 +77,21 @@ jobs:
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
         run: |
-          Get-ChildItem artifacts/packages -Filter *.nupkg |
-            Where-Object Extension -eq '.nupkg' |
-            ForEach-Object {
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $packages = @(Get-ChildItem artifacts/packages -Filter *.nupkg | Where-Object {
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($_.FullName)
+            try {
+              $entry = $archive.Entries | Where-Object FullName -like '*.nuspec' | Select-Object -First 1
+              if (-not $entry) { throw "Package metadata is missing: $($_.Name)." }
+              $reader = [System.IO.StreamReader]::new($entry.Open())
+              try { $spec = [xml]$reader.ReadToEnd() } finally { $reader.Dispose() }
+              [string]$spec.package.metadata.version -eq $env:PACKAGE_VERSION
+            } finally { $archive.Dispose() }
+          })
+          if ($packages.Count -eq 0) { throw "No packages match release version $env:PACKAGE_VERSION." }
+          $packages | ForEach-Object {
               dotnet nuget push $_.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
               if ($LASTEXITCODE -ne 0) { throw "NuGet push failed for $($_.Name)." }
             }
@@ -88,5 +104,5 @@ jobs:
         run: |
           gh release view $env:RELEASE_TAG --repo '${{ github.repository }}' *> $null
           if ($LASTEXITCODE -eq 0) { exit 0 }
-          gh release create $env:RELEASE_TAG --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "C-Sweet Memory $env:PACKAGE_VERSION" --generate-notes
+          gh release create $env:RELEASE_TAG --repo '${{ github.repository }}' --target '${{ github.sha }}' --title "C-Sweet Memory $env:PACKAGE_VERSION" --notes-file "releases/$env:PACKAGE_VERSION.md"
           if ($LASTEXITCODE -ne 0) { throw "GitHub release creation failed." }
